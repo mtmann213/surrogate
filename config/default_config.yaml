@@ -1,0 +1,110 @@
+rf:
+  hw_mode: single_b210
+  simulation: false
+  gnd_device: serial=34D628A
+  msl_device: serial=34D628A
+  b210_ref_source: internal
+  center_frequency: 915000000.0
+  sample_rate: 2000000.0
+  tx_gain: 50.0
+  rx_gain: 50.0
+  tx_channel: 0
+  rx_channel: 1
+  tx_antenna: TX/RX
+  rx_antenna: RX2
+  tx_bandwidth: 1000000.0
+  rx_bandwidth: 1000000.0
+hopping:
+  enabled: true
+  hop_type: custom
+  hop_seed: 1588444911
+  hop_rate_hz: 1.0
+  hop_frequencies:
+  - 915000000.0
+  - 914000000.0
+  - 916000000.0
+  custom_pattern: []
+timing:
+  burst_duration_ms: 17.267999999999997
+  preamble_duration_ms: 0.64
+  transition_time_ms: 5.0
+  timing_jitter_us: 0.0
+modulation:
+  type: bpsk
+  bit_rate_bps: 50000.0
+  chip_rate_sps: 1000000.0
+  spreading:
+    enabled: true
+    code_type: gold
+    code_length: 31
+    code_seed: 42
+    degree: 5
+    poly1: '0x25'
+    poly2: '0x37'
+    custom_code: []
+  pulse_shaping:
+    filter_type: rrc
+    rolloff: 0.35
+    span_symbols: 11
+frame:
+  total_bits: 300
+  payload_hex: ''
+  preamble:
+    length_bits: 32
+    pattern: '0x55555555'
+  invariant:
+    enabled: true
+    length_bits: 16
+    pattern: '0x1234'
+  fec:
+    enabled: true
+    primary_type: cc
+    outer_type: none
+    cc:
+      rate_inv: 2
+      constraint_length: 7
+      polynomials:
+      - 121
+      - 91
+    rs:
+      nsym: 16
+anomaly:
+  enabled: false
+  ber_injection: 0.0
+  carrier_freq_offset_hz: 0.0
+  extra_timing_jitter_us: 0.0
+  burst_dropout:
+    enabled: false
+    dropout_probability: 0.0
+  power_fade:
+    enabled: false
+    fade_depth_db: 20.0
+    fade_rate_hz: 5.0
+  iq_imbalance:
+    enabled: false
+    amplitude_db: 0.0
+    phase_deg: 0.0
+  interference:
+    enabled: false
+    source_type: awgn
+    file_path: ''
+    zmq_address: tcp://127.0.0.1:5555
+    tone_freq_hz: 100000.0
+    awgn_bandwidth_hz: 1000000.0
+    relative_power_db: -20.0
+logging:
+  enabled: true
+  log_file: logs/surrogate.log
+  log_level: INFO
+  log_transmission: true
+  log_timing: true
+  csv:
+    enabled: true
+    file: logs/surrogate_frames.csv
+  iq_recording:
+    enabled: false
+    format: sigmf
+    output_path: recordings/
+    max_size_mb: 2000
+    record_tx: true
+    record_rx: true

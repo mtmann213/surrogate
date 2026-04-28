@@ -20,6 +20,7 @@ from core.hop_scheduler import HopScheduler
 from core.frame_generator import FrameGenerator
 from core.fec_codec import FECCodec
 from core.anomaly_injector import AnomalyInjector
+from radio.hop_timing import HopTimingController
 
 log = logging.getLogger(__name__)
 
@@ -181,12 +182,14 @@ class FlowgraphManager:
         s.last_snr = self._rx_fg.get_snr() if self._rx_fg else 0.0
         s.tx_rate = self._tx_tracker.rate()
         s.rx_rate = self._rx_tracker.rate()
-        s.current_hop_freq = self._hop_scheduler.frequency_at(
-            max(0, self._hop_scheduler.current_index() - 1)
-        )
-        s.hop_index = self._hop_scheduler.current_index()
+        if self._hop_timing is not None:
+            s.hop_index = self._hop_timing.current_hop_index()
+            s.current_hop_freq = self._hop_timing.current_hop_freq()
+        else:
+            s.hop_index = 0
+            s.current_hop_freq = self._hop_scheduler.frequency_at(0)
         if s.tx_frames > 0:
-            s.packet_loss_pct = max(0.0, (s.tx_frames - s.rx_frames) / s.tx_frames * 100)
+            s.packet_loss_pct = max(0.0, (s.tx_frames - s.rx_fec_ok) / s.tx_frames * 100)
         s.recent_events = list(self._events)
         s.running = self._running
         return s
@@ -202,9 +205,9 @@ class FlowgraphManager:
         return self._rx_fg.get_snr() if self._rx_fg else 0.0
 
     def get_current_hop_freq(self) -> float:
-        return self._hop_scheduler.frequency_at(
-            max(0, self._hop_scheduler.current_index() - 1)
-        )
+        if self._hop_timing is not None:
+            return self._hop_timing.current_hop_freq()
+        return self._hop_scheduler.frequency_at(0)
 
     # ------------------------------------------------------------------
     # Live parameter updates (no restart required)
@@ -237,11 +240,12 @@ class FlowgraphManager:
     def _build_core_objects(self, cfg: SurrogateConfig) -> None:
         self._fec_codec = FECCodec(cfg.frame.fec)
         self._frame_gen = FrameGenerator(cfg.frame, self._fec_codec)
-        # Single shared scheduler. TX advances it via next_frequency() at
-        # sample-driven boundaries; RX is preamble-anchored and only reads via
-        # frequency_at(), so there is no double-advance race.
+        # Single shared scheduler. Both TX and RX index by absolute hop number
+        # via frequency_at(N); HopTimingController is the sole authority on
+        # which N is current at any FPGA time.
         self._hop_scheduler = HopScheduler(cfg.hopping, cfg.rf)
         self._anomaly_injector = AnomalyInjector(cfg.anomaly)
+        self._hop_timing: Optional[HopTimingController] = None
 
     def _build_flowgraphs(self) -> None:
         from radio.tx_flowgraph import TXFlowgraph
@@ -259,6 +263,31 @@ class FlowgraphManager:
             self._fec_codec, self._dispatch_frame
         )
 
+        # ----------------------------------------------------------------
+        # Configure the shared FPGA epoch BEFORE starting either flowgraph.
+        # set_start_time() must be called pre-start, otherwise UHD ignores
+        # it and falls back to streaming-on-feed behaviour. Pre-queueing the
+        # first batch of timed retunes also has to happen here so the very
+        # first guard interval (between bursts 0 and 1) is covered.
+        # ----------------------------------------------------------------
+        if cfg.hopping.enabled and not cfg.rf.simulation:
+            burst_s = cfg.timing.burst_duration_ms / 1000.0
+            guard_s = cfg.timing.transition_time_ms / 1000.0
+            self._hop_timing = HopTimingController(
+                self._hop_scheduler,
+                cfg.rf.sample_rate, burst_s, guard_s,
+                tx_channel=cfg.rf.tx_channel,
+                rx_channel=cfg.rf.rx_channel,
+            )
+            self._hop_timing.attach(
+                tx_uhd=self._tx_fg._uhd_sink,
+                rx_uhd=self._rx_fg._uhd_src,
+            )
+            self._hop_timing.configure_epoch()
+            self._hop_timing.start()
+        else:
+            self._hop_timing = None
+
         # Start RX first so its UHD source is up and tuned to hop[0] before
         # the TX UHD sink emits its first burst.
         self._rx_fg.start()
@@ -266,6 +295,12 @@ class FlowgraphManager:
         log.info("Flowgraphs started")
 
     def _stop_flowgraphs(self) -> None:
+        if self._hop_timing is not None:
+            try:
+                self._hop_timing.stop()
+            except Exception as exc:
+                log.error("Error stopping HopTimingController: %s", exc)
+            self._hop_timing = None
         for fg in (self._tx_fg, self._rx_fg):
             if fg:
                 try:
@@ -285,18 +320,21 @@ class FlowgraphManager:
 
     def _on_tx_frame(self, frame_id: int, payload: bytes, timestamp: float) -> None:
         self._tx_tracker.record()
-        # The scheduler has already been advanced by the HopController for the NEXT burst,
-        # so the frequency used for THIS frame is current_index - 1.
-        idx = self._hop_scheduler.current_index()
-        hop_freq = self._hop_scheduler.frequency_at(max(0, idx - 1))
-            
+        # Authoritative hop state lives in HopTimingController (FPGA clock).
+        if self._hop_timing is not None:
+            idx = self._hop_timing.current_hop_index()
+            hop_freq = self._hop_scheduler.frequency_at(idx)
+        else:
+            idx = 0
+            hop_freq = self._hop_scheduler.frequency_at(0)
+
         self._logger.log_tx_frame(frame_id, payload, timestamp, hop_freq)
         
         # Dispatch via signals (for GUI/Qt thread)
         self.signals.tx_transmitted.emit(frame_id, payload, timestamp)
 
         ts = time.strftime("%H:%M:%S")
-        self._events.append(f"{ts}  TX #{frame_id}  {hop_freq/1e6:.3f} MHz")
+        self._events.append(f"{ts}  TX #{frame_id}  idx={idx}  {hop_freq/1e6:.3f} MHz")
 
     def _dispatch_frame(self, payload: bytes, timestamp: float,
                         snr: float, fec_ok: bool) -> None:
@@ -308,7 +346,10 @@ class FlowgraphManager:
         # Log to terminal always (so the user can see what's failing)
         self._logger.log_rx_frame(payload, timestamp, snr, fec_ok)
 
-        # Only process actual frames that passed the invariant/FEC check
+        # Hop retunes are driven by HopTimingController on the FPGA clock;
+        # the RX path no longer needs to react to preamble detection to
+        # advance the hop index.
+
         if not fec_ok:
             self._stats.rx_fec_err += 1
             return

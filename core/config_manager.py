@@ -313,6 +313,26 @@ class SurrogateConfig(BaseModel):
     anomaly: AnomalyConfig = Field(default_factory=AnomalyConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
+    @model_validator(mode='after')
+    def compute_burst_duration(self) -> 'SurrogateConfig':
+        from core.fec_codec import FECCodec
+        frame = self.frame
+        data_info_bits = frame.payload_bits + (frame.invariant.length_bits if frame.invariant.enabled else 0)
+        
+        fec = FECCodec(frame.fec)
+        if fec.enabled:
+            aligned_bits = ((data_info_bits + 7) // 8) * 8
+            coded_bits = fec.coded_length(aligned_bits)
+        else:
+            coded_bits = data_info_bits
+            
+        data_chips = coded_bits * self.modulation.spreading.code_length
+        total_chips = frame.preamble.length_bits + data_chips
+        
+        required_duration_s = total_chips / self.modulation.chip_rate_sps
+        self.timing.burst_duration_ms = required_duration_s * 1000.0
+        return self
+
     @model_validator(mode="before")
     @classmethod
     def _auto_derive(cls, data: Any) -> Any:

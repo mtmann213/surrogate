@@ -5,15 +5,15 @@ rf:
   msl_device: serial=34D628A
   b210_ref_source: internal
   center_frequency: 915000000.0
-  sample_rate: 2000000.0
+  sample_rate: 1000000.0
   tx_gain: 50.0
   rx_gain: 50.0
   tx_channel: 0
   rx_channel: 1
   tx_antenna: TX/RX
   rx_antenna: RX2
-  tx_bandwidth: 1000000.0
-  rx_bandwidth: 1000000.0
+  tx_bandwidth: 500000.0
+  rx_bandwidth: 500000.0
 hopping:
   enabled: true
   hop_type: custom
@@ -21,18 +21,18 @@ hopping:
   hop_rate_hz: 1.0
   hop_frequencies:
   - 915000000.0
-  - 914000000.0
-  - 916000000.0
+  - 914300000.0
+  - 915700000.0
   custom_pattern: []
 timing:
-  burst_duration_ms: 17.267999999999997
-  preamble_duration_ms: 0.64
-  transition_time_ms: 5.0
+  burst_duration_ms: 69.07199999999999
+  preamble_duration_ms: 2.56
+  transition_time_ms: 10.0
   timing_jitter_us: 0.0
 modulation:
   type: bpsk
-  bit_rate_bps: 50000.0
-  chip_rate_sps: 1000000.0
+  bit_rate_bps: 12500.0
+  chip_rate_sps: 250000.0
   spreading:
     enabled: true
     code_type: gold

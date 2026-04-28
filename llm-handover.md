@@ -1,7 +1,191 @@
 # LLM Handover — Surrogate Datalink System
 
 Generated: 2026-04-26
-Last update: 2026-04-27 (Opus session)
+Last update: 2026-04-28 (Opus — RF-timed FHSS hit a wall, baseband FHSS proposed)
+
+---
+
+## 0zzzzz. 2026-04-28 (fourth pass) — RF-timed FHSS architecture is structurally limited; proposing baseband digital FHSS
+
+After three rounds of fixes (channel-arg overload → block-vs-device channel → msg-port retunes), the obvious failure modes are gone (`RX channel <huge>` errors gone, cmd-time-error storm gone, `LLLLL` underflow river gone). But the link still decodes zero frames, and the bench reveals three deeper symptoms:
+
+1. **TX/RX freq mismatch persists** — 60% of `[HW-STATE]` reads catch the two radios on different hops, far more than the ~6% that sampling-artifact would predict for a 5 ms inter-call gap inside a 79 ms hop. The two radios are genuinely running on different schedules even though we post the same PMT command to both — `usrp_sink` and `usrp_source` have separate handler threads / separate command queues that drain into the FPGA via the same USB control endpoint.
+2. **TX chip queue persistently full** — FrameFeeder runs at ~1 fps vs the ~14.7 fps that matches `chip_rate ÷ chips_per_frame`. Throughput is throttled ~12× somewhere in the chain.
+3. **`gr::uhd::rfnoc_block::general_work` terminate** — after ~12 s of sustained timed-command pressure, the GR scheduler aborts on an unhandled C++ exception bubbling up from UHD's general_work. Same root cause as the earlier `Radio ctrl (0) packet parse error` (B210 USB control bus saturation), but now fatal.
+
+### Why the architecture is structurally fragile
+
+- Two `multi_usrp` handles to the same B210 (sink + source). Even though gr-uhd's command msg-port is the canonical path, the two handlers race to push timed commands to a single shared FPGA command queue across one shared USB control endpoint.
+- ~25 timed-commands/sec (12.5 hops × 2 sides) is enough sustained pressure that B210's control bus eventually corrupts a packet-count check and aborts.
+- `usrp_sink.set_start_time(T0)` cannot be empirically confirmed to pin TX sample-0 to T0 in this gr-uhd version. Bench evidence (chip queue backing up at startup; freq mismatches) suggests TX bursts are not aligned with retune times, so even when retunes fire on schedule, the burst is partly on the old freq.
+
+### Proposed pivot — baseband digital FHSS
+
+Take RF retunes off the table. Both TX and RX sit on a fixed center freq; hopping is implemented as a complex rotation in the GR chain.
+
+- TX: `exp(+j 2π Δf_k t)` applied at the head of the chain.
+- RX: `exp(-j 2π Δf_k t)` applied after AGC/DC-blocker, before demod.
+- Hop index = `sample_count // period_samples`. Single shared T0 → single shared sample counter per side.
+- No timed UHD commands. No command-queue traffic. No `cmd time errors`. No `radio_ctrl` aborts.
+
+**Constraint:** Δf range ≤ sample_rate / 2. Current spread ±0.7 MHz needs `sample_rate ≥ 2 Msps` (currently 1 Msps; B210 trivially handles 2 Msps over USB 3).
+
+**Replacement scope:**
+- New `radio/blocks/baseband_hopper.py` (~80 lines) — gr.sync_block, phase accumulator + per-sample complex rotation.
+- One instance at the head of TX (pre-BurstGate). One instance at the head of RX (post-AGC).
+- Delete or quarantine `radio/hop_timing.py` (keep as `_legacy_rf_hopping.py` reference for the dual-board / external-RF-only future).
+- `FlowgraphManager._build_flowgraphs` instantiates BasebandHopper instead of HopTimingController.
+
+**What stays:**
+- `HopScheduler` (freq-list + seed-driven permutation) — unchanged.
+- BurstGate / FrameFeeder / FrameSink / FEC / DSSS — unchanged.
+- `set_time_now(0)` + `set_start_time(T0)` to anchor sample-0 to a shared T0 across TX sink and RX source.
+
+**Pros:** TX/RX synchronized by construction; works on dual_b205 (no shared TCXO needed); no PLL settling penalty; faster hop rates possible.
+
+**Cons:** Hop range capped at half the sample rate; slight CPU cost for the per-sample rotation (≪ 1 % of one core at 2 Msps).
+
+---
+
+## 0zzzz. 2026-04-28 (third pass) — Switched to gr-uhd `command` message port (NOT ENOUGH)
+
+---
+
+## 0zzzz. 2026-04-28 (third pass) — Switched to gr-uhd `command` message port
+
+After the channel-arg fix, hop freqs rotated correctly but the bench run still produced a `usrp_sink cmd time errors` storm (~1000/sec) and TX underflows. Direct-API chain `set_command_time → set_center_freq → clear_command_time` is fragile under Python threading: an interrupt between calls leaks an armed command time that contaminates subsequent unrelated UHD calls. Suspicious bench evidence: 0.55s gap mid-initial-pass while issuing 8 hops, and `ERROR_CODE_LATE_COMMAND` before the flowgraph started streaming.
+
+Switched to the canonical pattern — post a PMT dict to the block's `command` message port:
+```python
+cmd = pmt.make_dict()
+cmd = pmt.dict_add(cmd, pmt.intern("freq"), pmt.from_double(float(freq)))
+cmd = pmt.dict_add(cmd, pmt.intern("chan"), pmt.from_long(0))
+cmd = pmt.dict_add(cmd, pmt.intern("time"),
+                   pmt.cons(pmt.from_uint64(secs_int), pmt.from_double(secs_frac)))
+u.to_basic_block()._post(pmt.intern("command"), cmd)
+```
+gr-uhd's `command_msg_handler` runs on its own thread and applies `time` + `freq` atomically. No more cross-thread arming/clearing.
+
+Also synced `config/default_config.yaml` so `python3 main.py` enables hopping by default (matches former gemini_config).
+
+---
+
+## 0zzz. 2026-04-28 (later) — `set_center_freq` was a block-vs-device channel bug (SUPERSEDED)
+
+The `tune_request_t` wrap was the wrong diagnosis. Test #2 produced an identical `multi_usrp: RX channel <huge int> out of range` with a different memory-pointer-shaped garbage number, proving the issue wasn't the freq-arg type.
+
+Real bug: gr-uhd's `usrp_sink` / `usrp_source`, when constructed with `stream_args.channels=[N]`, expose that single device frontend at *block-relative* channel index 0. All per-channel API calls (`set_center_freq`, `set_gain`, `set_antenna`) take the block index — see `rx_flowgraph.py:89` which calls `set_center_freq(freq, 0)` despite `rf.rx_channel=1`.
+
+`HopTimingController._issue_timed_retune` was passing `chan=rf.rx_channel=1` (device index). With only one block channel (index 0), passing chan=1 sent pybind down a fallback path that read the channel from the wrong stack slot — hence the garbage number.
+
+**Fix:** `radio/hop_timing.py:_issue_timed_retune` now does
+```python
+u.set_command_time(ts)
+u.set_center_freq(float(freq), 0)   # block-relative channel
+u.clear_command_time()
+```
+The `tune_request_t` wrap was reverted — `(double, 0)` matches the same overload the flowgraph init code uses successfully. `tx_channel` / `rx_channel` args on the constructor are now kept for logging only.
+
+The cmd-time-error storm on usrp_sink should also resolve: previously `set_center_freq` raised before `clear_command_time`, leaving a stale armed command time on the device handle. With the call now succeeding, the arm/fire/clear cycle is clean.
+
+---
+
+## 0zz. 2026-04-28 — Post-test bugfix: `set_center_freq` overload mismatch (SUPERSEDED)
+
+The shared-epoch rewrite ran end-to-end on the bench and surfaced two new symptoms in the test log:
+
+1. **Channel-index error storm on RX:**
+   `Timed retune (rx ch=1) failed: LookupError: IndexError: multi_usrp: RX channel 126008099355424 out of range`
+   The 12-digit "channel" is the freq value (e.g. 9.13e8 ≈ 126e12 reinterpreted as int64). Root cause: gr-uhd's two-arg `set_center_freq(tune_request_t, chan)` overload was being called as `set_center_freq(double, chan)`. pybind11 reads `chan` from the wrong stack slot, producing a garbage channel index.
+   **Fix applied** in `radio/hop_timing.py:_issue_timed_retune`: wrap freq in `uhd.tune_request_t(freq)` before the call.
+
+2. **`usrp_sink :error: cmd time errors` storm + occasional `ERROR_CODE_LATE_COMMAND` on source.**
+   Likely a side-effect of (1): `set_command_time(ts)` was armed, then `set_center_freq(...)` raised before `clear_command_time()` could run, leaving the handle in an inconsistent state. Subsequent UHD calls inherited the stale armed time, deadlines fell into the past, and the FPGA logged a flood of late-command errors. The `tune_request_t` fix should restore the proper arm/fire/clear cycle. If the storm persists after the fix, the next move is an explicit `tx_sob`/`tx_time` tagger at the head of the TX path — see open risk #1 in section 0z.
+
+3. **TX chip queue backpressure (`TX chip queue full — dropping frame`)** is downstream of the timing chaos: with cmd time errors clogging UHD, the sink stalls and the FrameFeeder's blocking `put` on the bounded chip queue eventually times out. Expected to clear once (1) and (2) settle.
+
+### TX/RX freq desync observed in the log
+`[HW-STATE] TX=913.000 MHz, RX=915.000 MHz` — TX retunes appear to be working (different overload behaviour on sink vs source pybind path? to confirm) while RX retunes fail entirely, leaving RX pinned to a stale frequency. Wrapping in `tune_request_t` makes both calls use the same canonical UHD overload.
+
+---
+
+## 0z. 2026-04-28 — FHSS redesigned around a shared FPGA epoch
+
+The patches in 0a (chicken-and-egg, target_hw) addressed correctness within the **reactive** RX design but didn't fix the user's symptom (~0 FEC=OK with hopping). The user pushed back: *"is the hop schedule following a strict timing source for both tx and rx?"* Audit answer was no — TX was sample-tag-driven (strict in principle, fragile in practice), RX was preamble-reactive (not strict at all). No shared epoch existed between TX and RX.
+
+The whole hop-timing layer was rewritten this turn around a shared FPGA epoch.
+
+### New module: `radio/hop_timing.py:HopTimingController`
+
+Owns one piece of state — `T0`, the FPGA-time origin of the hop schedule — and queues UHD timed commands on both sink and source FPGAs against it.
+
+- `configure_epoch()` (called between flowgraph construction and start):
+  - `set_time_now(0)` on the UHD device.
+  - `T0 = get_time_now() + 0.5 s` (default `start_offset_s`).
+  - `set_start_time(T0)` on both sink and source so sample 0 corresponds to FPGA time T0.
+- `start()` pre-queues hops 1..K covering 1 s of FPGA time (default `queue_horizon_s=1.0`), then spawns a background thread that refills the queue every 200 ms (`refill_period_s`).
+- For each hop index N, the timed command fires at:
+    `T_retune(N) = T0 + (N-1)·period_s + burst_s + 0.001`
+  i.e. 1 ms into guard (N-1). Both TX sink and RX source receive the same command at the same FPGA time → both RFICs are retuned synchronously.
+- `current_hop_index()` returns `int((time_now − T0) / period_s)` — used for stats / GUI / TX frame logging.
+
+### What was removed (now dead/no-op)
+
+- TX `HopController.work()` no longer emits `tx_command` stream tags. It is a pure complex pass-through. Kept in the chain only because `enable_iq_recording()` taps the post-hop_ctrl point.
+- RX `HopController.work()` no longer scans `rx_time` tags, no longer runs the time-anchored watchdog. Pure pass-through.
+- `HopController.advance_and_tune()` and `_do_rx_tune()` deleted.
+- `FlowgraphManager._dispatch_frame` no longer calls `advance_and_tune()`. Frame decode is now completely independent of hop scheduling.
+- `rx_flowgraph._connect` no longer `msg_connect`s `tune_cmd → uhd_src.command`.
+
+### Why this is safer
+
+Single B210 ⇒ single TCXO ⇒ one shared FPGA clock between sink and source. UHD's command queue executes commands *on the FPGA* at the requested hardware time. Host pipeline lag (USB DMA, GR scheduler, FrameSink decode latency) can no longer shift retune timing — the timed command lives in FPGA RAM and fires at exactly T_retune(N) regardless of what the host is doing.
+
+The chicken-and-egg from the reactive design is structurally impossible: there is no condition that gates retunes on FEC success, no preamble dependency, no race.
+
+### Open risks for the next test
+
+1. **`usrp_sink.set_start_time` semantics.** For sources, `set_start_time` schedules the first stream command. For sinks, the canonical UHD pattern is to attach a `tx_time` stream tag to the first sample. gr-uhd's `usrp_sink.set_start_time` *may* internally do this, but if it doesn't, TX sample 0 will hit the antenna at whatever FPGA time the host happens to provide it — not T0 — and burst boundaries won't line up with retune commands. If the test shows retune commands firing at correct hw_t but RX still gets garbage on every burst, the next move is to add an explicit tx_time tagger at the head of the TX path (sample 0 → `tx_sob=True`, `tx_time=T0`).
+2. **dual_b210 / dual_b205 without external ref.** Two boards = two independent TCXOs, drifting at ~1 ppm. This design assumes shared TCXO. Note in CLAUDE.md states the recommended setup is single_b210, so this is acceptable for the current test plan.
+3. **Command queue depth.** UHD's per-channel command queue has finite depth (~64 on B210). With 200 ms refill period and ~22 ms hop period, ~9 hops accumulate per refill — well within budget. If the refill thread starves under load, queue exhaustion would silently stop hopping. Mitigated by `queue_horizon_s=1.0` (50 hops ahead) and `refill_period_s=0.2`.
+
+### File-by-file diff summary
+
+- **NEW** `radio/hop_timing.py` — 200 lines. The whole new design lives here.
+- `radio/flowgraph_manager.py`:
+  - `_build_core_objects` zeroes `_hop_timing`.
+  - `_build_flowgraphs` builds + configures + starts HopTimingController between flowgraph construction and `.start()`.
+  - `_stop_flowgraphs` stops HopTimingController first.
+  - `_dispatch_frame` advance_and_tune call removed.
+  - `get_stats` and `get_current_hop_freq` and `_on_tx_frame` now read hop index/freq from HopTimingController.
+- `radio/blocks/hop_controller.py` — reduced to ~60 lines, pure pass-through. Kept the constructor signature (mode='tx'/'rx', uhd_src kwarg) so callers don't break.
+- `radio/rx_flowgraph.py` — `tune_cmd → uhd_src.command` msg_connect removed; comment updated.
+
+### Earlier sections preserved below
+
+Section 0a (chicken-and-egg + target_hw) and Section 0 (full investigation log) describe the reactive design that this rewrite supersedes. Reading them is still useful for understanding the failure modes that motivated the redesign — but the code paths they describe no longer exist.
+
+---
+
+## 0a. 2026-04-27 (Opus, second pass) — found and fixed two compounding RX bugs
+
+After the user noted "there may be some slight changes in the file due to attempted continued work", re-read the repo. A local LLM had refactored the RX hop path in the interim, removing the `FrameSink.preamble_detected → HopController` msg wiring and replacing it with a public `HopController.advance_and_tune()` called from `FlowgraphManager._dispatch_frame`. That refactor introduced two compounding bugs that together pin RX on `freq[0]` after burst 0 and produce the exact symptom the user reported (1 FEC=OK frame, then silence).
+
+**Bug A — chicken-and-egg.** `_dispatch_frame` only invoked `advance_and_tune()` when `fec_ok=True`. After burst 0, getting FEC=OK requires a successful retune on the previous burst, but the retune fires only on FEC=OK → permanent deadlock the moment a single burst FEC-fails. The same call also initialises `_time_anchored_set` for the standalone watchdog in `work()`, so the watchdog was likewise never armed. This matches the user's "almost like you aren't using the sync word" intuition: the sync word *is* found (FrameSink emits the callback), but the hop machinery is gated on something downstream of sync and silently never advances.
+
+*Fix:* `flowgraph_manager.py` now calls `advance_and_tune()` before the `if not fec_ok: return` early-out. A real preamble correlation peak alone is sufficient evidence we were tuned correctly for the burst that just arrived — gate on that, not FEC.
+
+**Bug B — target_hw points into the burst, not the guard.** Both `advance_and_tune()` and the work() watchdog used `target_hw = anchor + (period+1)*period_s − burst_s − 0.002`, which simplifies to `anchor + period*period_s + guard_s − 0.002`. For period=0 with burst_s=17.27 ms / guard_s=5 ms that puts the timed retune at `anchor + 3 ms` — i.e. ~3 ms into burst 0 itself. The PLL then settles during burst 1's data section.
+
+*Fix:* both occurrences now use `target_hw = anchor + period*period_s + burst_s + 0.001` — 1 ms into the guard *after* burst N, leaving guard_s − 1 ms for the PLL to settle before burst N+1's preamble.
+
+**Files modified this turn:**
+- `radio/flowgraph_manager.py:_dispatch_frame` — moved `advance_and_tune()` call ahead of FEC gate.
+- `radio/blocks/hop_controller.py` — corrected target_hw formula in two places.
+
+**Still concerning if next test fails:**
+- The time anchor (`_time_anchored_hw`) is set from the decode-worker thread, where `nitems_read(0)` is several ms ahead of the actual frame in the pipeline. So the anchor is offset by the decode latency L, and `target_hw = burst_0_end + L + 1 ms`. If L > guard_s ≈ 5 ms, UHD sees a past-time command, executes it immediately, and the retune lands inside burst N+1 instead of the guard. Cleanest fix is to anchor from the GR scheduler thread via `FrameSink.preamble_detected` (the local LLM removed that wiring; HopController would need a re-registered input msg port).
+- TX side has logged zero `Hop-Tag` lines on the failing run. The TX work() loop and tag emission look correct in isolation (idx=0 → seq[1] tag at first guard-start; `_current_freq=0.0` initially so the first tag always passes the `freq != _current_freq` guard). If next test still shows no Hop-Tag lines, suspect (a) UHD underflows starving the flowgraph, (b) HopController disconnected from TX path post-restart.
 
 ---
 

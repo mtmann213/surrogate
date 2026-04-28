@@ -64,6 +64,7 @@ class FrameSink(gr.sync_block):
         # Output message port: published on each preamble detection so the
         # RX HopController (and any other listener) can advance hop state.
         self.message_port_register_out(pmt.intern("preamble_detected"))
+        self.message_port_register_out(pmt.intern("frame_complete"))
 
         self._preamble   = (1 - 2 * preamble_bits.astype(np.float32))   # bipolar ±1
         self._pre_len    = len(preamble_bits)
@@ -142,19 +143,36 @@ class FrameSink(gr.sync_block):
         threshold = 0.55 * pl
         self.last_peak = peak_val
         self._search_count += 1
+
+        # Chip-level diagnostics around correlation peak
+        chip_region = buf[peak_idx:peak_idx+pl]
+        chip_mean = float(np.mean(chip_region))
+        chip_std = float(np.std(chip_region))
+        chip_abs_mean = float(np.mean(np.abs(chip_region)))
+        chip_corr = float(np.sum(chip_region * ref))
+
         now = time.time()
         if now - self._last_debug_t >= 2.0:
             mean_amp = float(np.mean(np.abs(buf)))
             log.info(
-                "[RX-DIAG] corr peak=%.2f  threshold=%.2f  mean_amp=%.3f  buf_chips=%d  searches=%d",
+                "[RX-DIAG] corr peak=%.2f  threshold=%.2f  mean_amp=%.3f  buf_chips=%d  searches=%d "
+                "chip_mean=%.3f  chip_std=%.3f  chip_abs=%.3f  raw_corr=%.2f",
                 peak_val, threshold, mean_amp, n, self._search_count,
+                chip_mean, chip_std, chip_abs_mean, chip_corr,
             )
             self._last_debug_t = now
             self._search_count = 0
 
         if peak_val >= threshold:
             noise = float(np.std(np.abs(corr))) + 1e-9
-            self.last_snr = 20.0 * np.log10(peak_val / (noise * np.sqrt(pl)))
+            snr_val = 20.0 * np.log10(peak_val / (noise * np.sqrt(pl)))
+            
+            if snr_val < 5.0:
+                # False positive due to high noise or adjacent channel bleed
+                self._np_buf = buf[-(pl - 1):].copy()
+                return
+
+            self.last_snr = snr_val
             self._polarity = float(np.sign(corr[peak_idx]))
 
             log.info(
@@ -215,6 +233,20 @@ class FrameSink(gr.sync_block):
         snr       = self.last_snr
 
         self.frames_received += 1
+
+        # Diagnostics: despreading quality
+        # If despreading works, mean |soft_bit| ≈ code_length (31).
+        # Values near zero indicate chip misalignment, phase error, or wrong code.
+        mean_abs_sb = float(np.mean(np.abs(soft_bits)))
+        min_sb = float(np.min(soft_bits))
+        max_sb = float(np.max(soft_bits))
+        sb_std = float(np.std(soft_bits))
+        log.info(
+            "[RX-DIAG2] frame=%d  mean_abs_soft=%.1f  range=[%.1f, %.1f]  std=%.1f  code_len=%d",
+            self.frames_received, mean_abs_sb, min_sb, max_sb, sb_std, self._code_len,
+        )
+
+        self.message_port_pub(pmt.intern("frame_complete"), pmt.PMT_T)
 
         if self._callback:
             try:

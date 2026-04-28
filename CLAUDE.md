@@ -57,7 +57,7 @@ The codebase is split into three layers that can be used/tested independently:
 - A continuous `analog.noise_source_c` (heartbeat) runs at the full sample rate to drive the flowgraph's "clock" even between bursts.
 - `FrameFeeder` builds frames, applies FEC, and spreads with DSSS.
 - Gated bursts are mixed with the heartbeat via a `blocks.add_cc` block.
-- `HopController` monitors the heartbeat samples and attaches `tx_command` stream tags to the first sample of each burst for high-precision hardware tuning.
+- `HopController` is currently a pure pass-through. RF retunes (when hopping is enabled) are issued by `radio/hop_timing.py:HopTimingController` directly to the UHD sink/source via the gr-uhd `command` message port, against a shared FPGA epoch T0. **As of 2026-04-28 this approach does not produce a working datalink** (see "Frequency hopping — current status" below).
 
 **RX path** (flowgraph only):
 - UHD source → DC blocker → AGC → Demodulator (RRC/Costas for BPSK/QPSK, RRC/M&M for OQPSK, GMSK for MSK) → `FrameSink`.
@@ -70,9 +70,29 @@ Config is a Pydantic `SurrogateConfig` model loaded from YAML. The hierarchy mir
 
 `ConfigManager.update(dict)` does a deep merge and notifies registered listeners. The `FlowgraphManager` is a listener and applies live-applicable changes immediately (gain, anomaly params, hop frequencies). Changes that require rebuilding GR filter taps or the modulation chain are flagged with a status-bar warning — call `FlowgraphManager.restart()` to apply them.
 
-### Frequency hopping synchronization
+### Frequency hopping — current status (2026-04-28)
 
-TX and RX stay in sync by counting the exact number of samples since start. The TX heartbeat ensures the TX counter never stalls, even if the Python feeder thread lags. Tune commands are executed by the USRP hardware driver at the exact sample offset specified by the stream tags.
+**Working state:** the link decodes well in the hopping-disabled (static) path, ~80% FEC=OK. With hopping enabled the link decodes 0 frames.
+
+**Current implementation** (`radio/hop_timing.py:HopTimingController`):
+- Single shared FPGA epoch T0 = `now + 0.5 s` from `set_time_now(0)`.
+- `set_start_time(T0)` on both `usrp_sink` and `usrp_source`.
+- Timed retunes posted to each block's `command` message port (PMT dict with `freq` + `chan` + `time`) at FPGA time `T0 + (N-1)·period_s + burst_s + 1 ms` — i.e. ~1 ms into guard interval N-1.
+
+**Known failure modes** (see RESUME.md for full bench logs):
+- TX/RX drift onto different hops — `[HW-STATE]` reads catch them on different freqs ~60% of the time.
+- TX chip queue persistently full; FrameFeeder runs ~12× slower than the chip-rate math predicts.
+- After ~10–12 s, `gr::uhd::rfnoc_block::general_work` aborts on a `Radio ctrl (0) packet parse error` — B210 USB control bus saturating under sustained ~25 timed-commands/sec.
+- `usrp_sink.set_start_time(T0)` cannot be empirically confirmed to pin TX sample-0 to T0 in this gr-uhd version.
+
+**Proposed next architecture — baseband digital FHSS** (not yet implemented):
+- Both TX and RX stay on a single fixed RF center freq.
+- Hopping is a complex rotation `exp(±j 2π Δf_k t)` applied per-sample in a new `BasebandHopper` block.
+- Single shared sample counter on each side (anchored to T0 via `set_start_time`) drives hop-index lookup.
+- Constraint: hop range ≤ sample_rate / 2 — the current spread (±0.7 MHz) requires bumping `sample_rate` to ≥ 2 Msps.
+- Pros: zero RF retunes / zero command-bus traffic / TX-RX synchronized by construction / works on dual_b205 without external 10 MHz reference.
+
+`HopController` is a pass-through in both modes, kept only because the IQ-recording tap connects post-hop_ctrl on TX.
 
 ### Frame structure
 

@@ -34,7 +34,7 @@ class HardDecision(gr.basic_block):
         out0 = output_items[0]
         n = len(out0)
         for i in range(n):
-            out0[i] = 1 if in0[i] >= 0.0 else 0
+            out0[i] = 0 if in0[i] >= 0.0 else 1
         self.consume(0, n)
         return n
 

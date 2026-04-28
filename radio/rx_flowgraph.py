@@ -154,11 +154,9 @@ class RXFlowgraph(gr.top_block):
             callback        = self._on_frame_received,
         )
 
-        # ---- Hop Controller (RX mode: preamble-anchored) ----
-        # In RX mode, HopController sits in the signal path so it sees the
-        # UHD source's rx_time tags (used to map sample offsets → FPGA
-        # hardware times). On preamble_detected it issues a *timed* tune_cmd
-        # scheduled for the current burst's guard interval.
+        # ---- Hop Controller (no-op pass-through) ----
+        # Retained as a topology placeholder; hopping is driven on the FPGA
+        # by HopTimingController via UHD timed commands.
         self._hop_ctrl = HopController(
             hop_scheduler, sample_rate, burst_s, guard_s, rf.rx_channel,
             mode='rx',
@@ -184,19 +182,10 @@ class RXFlowgraph(gr.top_block):
         # Do NOT connect the valve here — blocks.copy with set_enabled(False) calls
         # consume_each(0) which stalls the fan-out and starves the main RX path.
 
-        # Hop controller (RX mode): preamble-anchored.
-        # Kept as stream pass-through so the GR scheduler keeps its msg
-        # handler alive. Sample boundaries are ignored; the hop index
-        # advances when FrameSink publishes a preamble_detected message.
+        # Hop controller is a pure pass-through in the new design; UHD timed
+        # commands queued by HopTimingController do the actual retuning.
         if self._cfg.hopping.enabled:
             self.connect(last, self._hop_ctrl)
-            # FrameSink → HopController: preamble triggers retune for next burst.
-            self.msg_connect(self._frame_sink, pmt.intern("preamble_detected"),
-                             self._hop_ctrl, pmt.intern("preamble_detected"))
-            # HopController → UHD source: tune command for next burst's frequency.
-            if not self._cfg.rf.simulation:
-                self.msg_connect(self._hop_ctrl, pmt.intern("tune_cmd"),
-                                 self._uhd_src, pmt.intern("command"))
             last = self._hop_ctrl
 
         if self._cfg.modulation.type in ("msk", "gmsk"):

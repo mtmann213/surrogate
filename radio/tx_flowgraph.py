@@ -188,10 +188,10 @@ class TXFlowgraph(gr.top_block):
             rrc_taps_oq = gr_filter.firdes.root_raised_cosine(
                 1.0, sample_rate, chip_rate, ps_oq.rolloff, n_taps_oq
             )
-            self._rrc_i = gr_filter.interp_fir_filter_fff(sps_int, rrc_taps_oq)
-            self._rrc_q = gr_filter.interp_fir_filter_fff(sps_int, rrc_taps_oq)
-            # Q delay applied AFTER interpolation: sps/2 samples at sample_rate = T/2 chip period.
-            self._q_delay = blocks.delay(gr.sizeof_float, sps_int // 2)
+            self._rrc_i = gr_filter.interp_fir_filter_fff(sps_int * 2, rrc_taps_oq)
+            self._rrc_q = gr_filter.interp_fir_filter_fff(sps_int * 2, rrc_taps_oq)
+            # Q delay applied AFTER interpolation: sps_int samples at sample_rate = half symbol period.
+            self._q_delay = blocks.delay(gr.sizeof_float, sps_int)
             self._deinterleave = Deinterleave()
         else:
             self._rrc_i = None

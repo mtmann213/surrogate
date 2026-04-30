@@ -5,7 +5,7 @@ rf:
   msl_device: serial=34D628A
   b210_ref_source: internal
   center_frequency: 915000000.0
-  sample_rate: 1000000.0
+  sample_rate: 500000.0
   tx_gain: 50.0
   rx_gain: 50.0
   tx_channel: 0
@@ -15,14 +15,14 @@ rf:
   tx_bandwidth: 500000.0
   rx_bandwidth: 500000.0
 hopping:
-  enabled: true
+  enabled: false
   hop_type: custom
   hop_seed: 1588444911
   hop_rate_hz: 1.0
   hop_frequencies:
   - 915000000.0
-  - 914300000.0
-  - 915700000.0
+  - 914700000.0
+  - 915300000.0
   custom_pattern: []
 timing:
   burst_duration_ms: 69.07199999999999

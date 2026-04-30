@@ -26,12 +26,12 @@ python -c "from core.fec_codec import ConvolutionalCodec; ..."  # quick import c
 
 # Verify core modules independently (no SDR hardware needed)
 python3 -c "
-from core.config_manager import SurrogateConfig
+from core.config_manager import ConfigManager
 from core.spreading_codes import generate_gold
 from core.fec_codec import FECCodec
 from core.frame_generator import FrameGenerator
-from core.hop_scheduler import HopScheduler
-cfg = SurrogateConfig()
+cm = ConfigManager('config/default_config.yaml')
+cfg = cm.config
 fec = FECCodec(cfg.frame.fec)
 fg = FrameGenerator(cfg.frame, fec)
 frame = fg.build_frame(b'test')
@@ -57,10 +57,11 @@ The codebase is split into three layers that can be used/tested independently:
 - A continuous `analog.noise_source_c` (heartbeat) runs at the full sample rate to drive the flowgraph's "clock" even between bursts.
 - `FrameFeeder` builds frames, applies FEC, and spreads with DSSS.
 - Gated bursts are mixed with the heartbeat via a `blocks.add_cc` block.
-- `HopController` is currently a pure pass-through. RF retunes (when hopping is enabled) are issued by `radio/hop_timing.py:HopTimingController` directly to the UHD sink/source via the gr-uhd `command` message port, against a shared FPGA epoch T0. **As of 2026-04-28 this approach does not produce a working datalink** (see "Frequency hopping — current status" below).
+- `BasebandHopper` applies `exp(+j * 2π * Δf_k * t)` per-sample to implement frequency hopping without RF retunes. The UHD sink stays at a single fixed center frequency; the complex rotation shifts the baseband signal to the desired hop frequency on air.
+- `HopController` is a pure pass-through, kept only because the IQ-recording tap connects post-hop_ctrl on TX.
 
 **RX path** (flowgraph only):
-- UHD source → DC blocker → AGC → Demodulator (RRC/Costas for BPSK/QPSK, RRC/M&M for OQPSK, GMSK for MSK) → `FrameSink`.
+- UHD source → DC blocker → AGC → `BasebandHopper` (applies `exp(-j * 2π * Δf_k * t)` to cancel the TX rotation) → Demodulator (RRC/Costas for BPSK/QPSK, RRC/M&M for OQPSK, GMSK for MSK) → `FrameSink`.
 - `FrameSink` performs preamble correlation, assembles coded bits, and emits a Qt Signal.
 - `FrameGenerator.parse_frame()` verifies the 16-bit invariant (0x1234) and automatically corrects for 180° phase inversions.
 
@@ -72,27 +73,21 @@ Config is a Pydantic `SurrogateConfig` model loaded from YAML. The hierarchy mir
 
 ### Frequency hopping — current status (2026-04-28)
 
-**Working state:** the link decodes well in the hopping-disabled (static) path, ~80% FEC=OK. With hopping enabled the link decodes 0 frames.
+**Architecture:** baseband digital FHSS via `radio/blocks/baseband_hopper.py:BasebandHopper`.
 
-**Current implementation** (`radio/hop_timing.py:HopTimingController`):
-- Single shared FPGA epoch T0 = `now + 0.5 s` from `set_time_now(0)`.
-- `set_start_time(T0)` on both `usrp_sink` and `usrp_source`.
-- Timed retunes posted to each block's `command` message port (PMT dict with `freq` + `chan` + `time`) at FPGA time `T0 + (N-1)·period_s + burst_s + 1 ms` — i.e. ~1 ms into guard interval N-1.
+**How it works:**
+- Both TX and RX stay on a single fixed RF center frequency (default 915 MHz).
+- Hopping is implemented as a complex rotation per sample:
+  - TX: `out = in * exp(+j * 2π * Δf_k * t)` — shifts baseband signal up/down to hop freq
+  - RX: `out = in * exp(-j * 2π * Δf_k * t)` — cancels the TX rotation back to baseband
+- Hop index = `sample_count // period_samples` where `period_samples = burst + guard`. Both sides share the same hop schedule and timing via `set_start_time(T0)`.
+- **No RF retunes** — zero UHD command bus traffic, no PLL settling, no `cmd time errors`.
 
-**Known failure modes** (see RESUME.md for full bench logs):
-- TX/RX drift onto different hops — `[HW-STATE]` reads catch them on different freqs ~60% of the time.
-- TX chip queue persistently full; FrameFeeder runs ~12× slower than the chip-rate math predicts.
-- After ~10–12 s, `gr::uhd::rfnoc_block::general_work` aborts on a `Radio ctrl (0) packet parse error` — B210 USB control bus saturating under sustained ~25 timed-commands/sec.
-- `usrp_sink.set_start_time(T0)` cannot be empirically confirmed to pin TX sample-0 to T0 in this gr-uhd version.
+**Constraint:** Δf_max ≤ sample_rate / 2. With default hop set (±700 kHz) and `sample_rate = 2 Msps`, Nyquist is satisfied with margin. The analog bandwidth is set to `sample_rate / 2 = 1 MHz` to pass the full hop range.
 
-**Proposed next architecture — baseband digital FHSS** (not yet implemented):
-- Both TX and RX stay on a single fixed RF center freq.
-- Hopping is a complex rotation `exp(±j 2π Δf_k t)` applied per-sample in a new `BasebandHopper` block.
-- Single shared sample counter on each side (anchored to T0 via `set_start_time`) drives hop-index lookup.
-- Constraint: hop range ≤ sample_rate / 2 — the current spread (±0.7 MHz) requires bumping `sample_rate` to ≥ 2 Msps.
-- Pros: zero RF retunes / zero command-bus traffic / TX-RX synchronized by construction / works on dual_b205 without external 10 MHz reference.
+**Pros:** TX/RX synchronized by construction; works on dual_b205 (no shared TCXO needed because hopping is digital); supports arbitrary hop rates up to the burst period.
 
-`HopController` is a pass-through in both modes, kept only because the IQ-recording tap connects post-hop_ctrl on TX.
+**What was replaced:** The previous RF-timed approach (`radio/hop_timing.py:HopTimingController`) posted timed retune commands to both UHD sink and source via the gr-uhd `command` message port at each guard interval. This saturated the B210's USB control bus (~25 commands/sec), causing TX/RX to drift onto different frequencies ~60% of the time and crashing after ~10-12 s with `radio_ctrl` packet parse errors.
 
 ### Frame structure
 
@@ -103,8 +98,8 @@ Transmitted bit stream per burst:
 
 Default sizes (configurable):
   Total info bits:  300  (preamble=32 + invariant=16 + payload=252)
-  After FEC (1/2):  548 coded bits  (268 info × 2 + K-1 tail)
-  After spreading:  17020 chips  (32 preamble + 548 × code_length=31)
+  After FEC (1/2):  556 coded bits  (272 aligned info × 2 + K-1 tail)
+  After spreading:  17268 chips  (32 preamble + 556 × code_length=31)
 ```
 
 The preamble is **not** FEC-encoded and **not** spread — it is used for burst detection and timing recovery. The invariant section is a fixed 16-bit pattern that serves as a secondary sync marker in `FrameSink`.
@@ -113,21 +108,21 @@ The preamble is **not** FEC-encoded and **not** spread — it is used for burst 
 
 The burst duration is determined by `total_chips / chip_rate`. With default 300-bit frames (FEC on, code_length=31):
 
-| `code_length` | `chip_rate` | Burst duration | Processing gain |
-|---|---|---|---|
-| 7 | 1 Mchip/s | 3.9 ms | 8.5 dB |
-| 31 | 1.15 Mchip/s | 14.8 ms | 14.9 dB |
-| 31 | 5 Mchip/s | 3.4 ms | 14.9 dB |
-| 31 | 10 Mchip/s | 1.7 ms | 14.9 dB |
+| `code_length` | `chip_rate` | `sample_rate` | Burst duration | Processing gain |
+|---|---|---|---|---|
+| 7 | 1 Mchip/s | 2 Msps | 3.9 ms | 8.5 dB |
+| 31 | 250 kchip/s | 2 Msps | 69.1 ms | 14.9 dB |
+| 31 | 1.15 Mchip/s | 2 Msps | 14.8 ms | 14.9 dB |
+| 31 | 5 Mchip/s | 2 Msps | 3.4 ms | 14.9 dB |
 
-The `timing.burst_duration_ms` config field is used by `BurstGate` and `HopController` for windowing but does not change the chip count — it must be set consistently with the actual chip math or bursts will be clipped/padded.
+The `timing.burst_duration_ms` config field is used by `BurstGate` and `BasebandHopper` for windowing but does not change the chip count — it must be set consistently with the actual chip math or bursts will be clipped/padded.
 
 ### Hardware modes
 
 Set via `rf.hw_mode`:
 - `single_b210` — one B210, TX on channel 0 (port A), RX on channel 1 (port B). Both share the internal TCXO so timing is inherently synchronized. GND and MSL device strings resolve to the same physical device.
 - `dual_b210` — two B210s. For tighter timing, connect REF OUT of the master → REF IN of the slave via SMA cable and set `b210_ref_source: external` on the slave's config entry.
-- `dual_b205` — two B205s (1T1R each). No shared reference available without external hardware. Relies entirely on preamble-based timing recovery.
+- `dual_b205` — two B205s (1T1R each). Baseband FHSS works on dual_b205 without external reference because hopping is digital — no shared TCXO needed.
 
 Device serials are autodetected when `gnd_device: auto` or `msl_device: auto` using `uhd.find("")`. The RF panel has an "Auto-Detect Devices" button that also fills in the serial fields.
 
@@ -135,7 +130,7 @@ Device serials are autodetected when `gnd_device: auto` or `msl_device: auto` us
 
 **Live (no restart needed):** TX/RX gain, all anomaly parameters, hop frequencies, hop seed, interference power level.
 
-**Requires `FlowgraphManager.restart()`:** sample rate, chip rate, modulation type, spreading code type/length, RRC filter parameters, FEC type/polynomials, interference source type or file path.
+**Requires `FlowgraphManager.restart()`:** sample rate, chip rate, modulation type, spreading code type/length, RRC filter parameters, FEC type/polynomials, interference source type or file path, hopping enable/disable.
 
 ### Anomaly injection
 
@@ -182,12 +177,13 @@ FEC is applied at the byte level in the `FrameFeeder` thread before chips enter 
 - `radio/iq_recorder.py` — IQ recording via `file_sink` + SigMF metadata writer
 
 ### Custom Blocks (`radio/blocks/`)
+- `baseband_hopper.py` — Baseband digital FHSS: per-sample complex rotation (TX: +Δf, RX: -Δf)
 - `frame_sink.py` — Preamble detection + chip collection + despreading + FEC callback
-- `hop_controller.py` — Stream tag insertion (TX) + tune command generation (RX)
+- `hop_controller.py` — Pure pass-through (kept as IQ-recording tap point)
 - `burst_gate.py` — Gated sample output for timed bursts
 - `dsss_spreader.py` — 1:code_length bit-to-chip interpolation
-- `dsss_despreader.py` — Integrate-and-dump despreading (chip→soft bit)
-- `preamble_inserter.py` — 32-bit preamble prepending to frames
+- `dsss_despreader.py` — Integrate-and-dump despreading (chip→soft bit, unused)
+- `preamble_inserter.py` — 32-bit preamble prepending to frames (unused)
 - `interleave.py` — OQPSK I/Q interleave/deinterleave + hard decision
 - `anomaly_block.py` — Real-time RF impairment injection (offset, fade, IQ imbalance)
 
@@ -200,7 +196,8 @@ FEC is applied at the byte level in the `FrameFeeder` thread before chips enter 
 - **FEC=ERR with good SNR**: Usually a spreading code mismatch between TX/RX or a phase inversion not corrected. Check that `modulation.spreading.code_seed` is identical on both sides.
 - **Underflows/UHD errors**: Reduce `sample_rate` to 2 MHz, lower `chip_rate`, or increase `transition_time_ms` to 5 ms.
 - **OQPSK errors**: Verify I/Q alignment — even chips → I, odd chips → Q, Q delayed by T/2.
-- **No RX frames**: Check that `rf.tx_channel` and `rf.rx_channel` match the physical port mapping.
+- **No RX frames with hopping**: Check `sample_rate ≥ 2 * |Δf_max|`. Default ±700 kHz hop set requires ≥ 2 Msps. Also verify `rf.tx_bandwidth`/`rf.rx_bandwidth` ≥ `sample_rate / 2` to pass the full hop range through the analog filter.
+- **No RX frames without hopping**: Check that `rf.tx_channel` and `rf.rx_channel` match the physical port mapping.
 - **Heartbeat**: The TX heartbeat ensures sample counters stay synced. If frames are dropped, check for CPU spikes or USB bandwidth issues.
 
 ## Performance Notes
@@ -210,3 +207,4 @@ FEC is applied at the byte level in the `FrameFeeder` thread before chips enter 
 - IQ recording uses `blocks.copy` valves — no restart needed to toggle recording.
 - Anomaly injection reads from shared `AnomalyState` — changes visible within one burst period.
 - Rate tracking uses rolling windows (5 seconds) for frames/sec calculations.
+- BasebandHopper short-circuits when only one frequency in the hop sequence (no per-sample rotation overhead).

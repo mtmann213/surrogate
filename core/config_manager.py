@@ -198,6 +198,24 @@ def _derive_frame_params(data: dict) -> dict:
     sample_rate = float(rf.get("sample_rate", 8.0e6))
     chip_rate   = float(mod.get("chip_rate_sps", 1.0e6))
 
+    # When hopping is enabled, ensure sample_rate satisfies Nyquist for
+    # the baseband digital FHSS rotation.  The rotated signal spans
+    # [Δf - BW/2, Δf + BW/2] where BW = chip_rate * (1+rolloff).
+    # Minimum sample_rate = 2 * max(|Δf| + BW/2) = 2 * |Δf_max| + BW.
+    hopping = data.get("hopping", {})
+    if hopping.get("enabled", False):
+        hop_freqs = hopping.get("hop_frequencies", [])
+        center = rf.get("center_frequency", 0.0)
+        ps = mod.get("pulse_shaping", {})
+        rolloff = float(ps.get("rolloff", 0.35))
+        sig_bw = chip_rate * (1.0 + rolloff)
+        if hop_freqs and center > 0:
+            max_df = max(abs(float(f) - center) for f in hop_freqs)
+            min_sr = 2.0 * max_df + sig_bw
+            if sample_rate < min_sr:
+                sample_rate = min_sr * 1.1  # 10% margin
+                data.setdefault("rf", {})["sample_rate"] = sample_rate
+
     # Snap chip_rate so sps = sample_rate / chip_rate is a positive integer.
     # Non-integer sps makes int(sps) truncate in the RRC interpolation filter,
     # causing the actual output sample rate to differ from sample_rate.

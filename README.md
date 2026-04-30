@@ -4,7 +4,7 @@ A configurable bidirectional missile datalink surrogate implemented in Python an
 
 ## Features
 
-- **Bidirectional FHSS** — Hardware-locked hopping using stream tags and a continuous heartbeat for perfect TX/RX synchronization.
+- **Bidirectional FHSS** — Baseband digital frequency hopping via complex rotation. No RF retunes, no command bus traffic, no PLL settling. TX/RX synchronized by construction.
 - **DSSS spreading** — Gold codes, m-sequences, Kasami codes, or custom codes; chip rates up to ~10 Mchip/s.
 - **Burst mode** — Timed gate with configurable duration, preamble, and guard intervals.
 - **FEC** — Convolutional K=7 rate-1/2 (NASA polynomials) with optional Reed-Solomon outer code.
@@ -50,18 +50,19 @@ The system will use ZMQ to loop back the signal internally.
 - **Note**: OQPSK uses coherent RRC matched filter + M&M timing recovery; GMSK/MSK use non-coherent demodulation.
 
 ### Hopping (`hopping`)
-- `transition_time_ms`: Recommended **5.0 ms** for B210 hardware settling.
-- `sample_rate`: Recommended **2.0 MHz** for stable hopping without USB underflows.
+- **Baseband digital FHSS**: Both TX and RX stay on a single fixed RF center frequency. Hopping is a complex rotation per sample in baseband. No timed UHD commands.
+- `sample_rate`: Must be ≥ 2 × |Δf_max|. Default hop set (±700 kHz at 915 MHz) requires **2.0 MHz**.
+- `transition_time_ms`: Recommended **10.0 ms** guard interval.
 
 ## Project Structure
 
 - `core/`: Pure Python signal processing logic (FEC, spreading, scheduling).
 - `radio/`: GNU Radio flowgraphs and hardware interface.
-- `radio/blocks/`: Custom C++/Python blocks (HopController, FrameSink, BurstGate).
+- `radio/blocks/`: Custom C++/Python blocks (BasebandHopper, FrameSink, BurstGate).
 - `gui/`: PyQt5 user interface.
 
 ## Recent Architectural Changes
-- **Heartbeat TX**: The transmitter now runs a continuous low-level noise stream ("heartbeat") to keep the hardware clock and hopping counters perfectly synchronized with the receiver even during CPU lag.
-- **Tag-based Hopping**: Tune commands are now sent as high-precision stream tags rather than asynchronous messages, ensuring sub-microsecond retune accuracy.
+- **Baseband Digital FHSS**: Replaced RF-timed retune approach (saturated USB control bus, TX/RX freq mismatch, crashes) with per-sample complex rotation. Both TX and RX stay on a single fixed center frequency; `BasebandHopper` applies `exp(±j * 2π * Δf_k * t)` to implement hopping without any UHD command traffic.
+- **Heartbeat TX**: The transmitter runs a continuous low-level noise stream ("heartbeat") to keep the GR scheduler fed even between bursts.
 - **Qt Signals**: All frame dispatching uses Qt Signals to ensure thread-safe GUI updates.
 - **Invariant Sync**: Every frame is verified against a 16-bit invariant (0x1234) and handles 180° phase inversions automatically.

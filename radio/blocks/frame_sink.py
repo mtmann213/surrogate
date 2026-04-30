@@ -1,34 +1,19 @@
 """
-Frame Sink — GNU Radio block.
+Frame Sink -- GNU Radio block.
 
 Performs the complete RX frame pipeline in one block:
   1. Preamble detection via sliding bipolar correlation (unspread symbols)
   2. Chip collection for one full frame after the preamble
-  3. Integrate-and-dump despreading (vectorised, one soft bit per code_length chips)
+  3. Despreading (vectorised, one soft bit per code_length chips)
   4. Hard-decision and callback dispatch
 
-Input:  float32 soft BPSK symbols (one per chip, output of complex_to_real)
+Input:  float32 soft BPSK symbols (one per chip, after complex_to_real)
 Output: none (sink)
-
-The preamble section of each burst is NOT spread (raw BPSK), so the correlator
-works directly on the soft chip stream. The data chips that follow are spread
-and are despread here before calling the frame callback.
-
-PERFORMANCE NOTE
-----------------
-work() must return in microseconds to avoid starving the GR scheduler of the
-Python GIL.  All buffer management uses numpy operations (which release the GIL
-during C execution) rather than Python-level deque iteration (which holds the
-GIL ~150 µs per 1024-chip call and caused 400+ UHD underflows/sec).
-
-THREADING NOTE
---------------
-The Viterbi FEC decoder is dispatched to a background thread via a bounded
-queue so work() never blocks on decode.
 """
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import threading
 import time
@@ -50,50 +35,45 @@ class FrameSink(gr.sync_block):
                  frame_coded_bits: int,
                  spreading_code: np.ndarray,
                  code_length: int,
-                 callback: Optional[Callable] = None):
-        """
-        preamble_bits:    binary (0/1) preamble, NOT spread
-        frame_coded_bits: coded data bits per frame (after FEC, before spreading)
-        spreading_code:   binary (0/1) spreading code used on data chips
-        code_length:      chips per coded bit (== len(spreading_code) for one period)
-        callback:         fn(coded_bits: np.ndarray, timestamp: float, snr: float)
-        """
+                 callback: Optional[Callable] = None,
+                 diag_dir: Optional[str] = None):
         gr.sync_block.__init__(self, "Frame Sink",
                                in_sig=[np.float32], out_sig=[])
 
-        # Output message port: published on each preamble detection so the
-        # RX HopController (and any other listener) can advance hop state.
         self.message_port_register_out(pmt.intern("preamble_detected"))
         self.message_port_register_out(pmt.intern("frame_complete"))
 
-        self._preamble   = (1 - 2 * preamble_bits.astype(np.float32))   # bipolar ±1
-        self._pre_len    = len(preamble_bits)
-        self._code       = (1 - 2 * spreading_code[:code_length].astype(np.float32))
-        self._code_len   = code_length
+        self._preamble = (1 - 2 * preamble_bits.astype(np.float32))
+        self._pre_len = len(preamble_bits)
+        self._code = (1 - 2 * spreading_code[:code_length].astype(np.float32))
+        self._code_len = code_length
         self._coded_bits = frame_coded_bits
         self._data_chips = frame_coded_bits * code_length
-        self._callback   = callback
+        self._callback = callback
 
-        # Search buffer: a plain numpy array that stays small (trimmed to
-        # 2×pre_len after each failed search).  np.concatenate releases the
-        # GIL during its C copy, so work() stays GIL-friendly.
-        self._np_buf: np.ndarray = _EMPTY.copy()
+        self._buf: np.ndarray = _EMPTY.copy()
         self._new_samples = 0
-
-        # State machine
-        self._state       = "SEARCHING"   # SEARCHING | COLLECTING
+        self._state = "SEARCHING"
         self._collect_buf = np.empty(self._data_chips, dtype=np.float32)
         self._collect_idx = 0
-        self._polarity    = 1.0
+        self._polarity = 1.0
 
-        # Statistics
         self.frames_received = 0
-        self.last_snr        = 0.0
-        self.last_peak       = 0.0
-        self._search_count   = 0
-        self._last_debug_t   = time.time()
+        self.last_snr = 0.0
+        self.last_peak = 0.0
+        self._search_count = 0
+        self._last_debug_t = time.time()
+        self._diag_dir = diag_dir
+        self._diag_save_idx = 0
+        self._peak_history = []
+        self._last_near_miss_t = 0.0
+        self._preamble_raw = preamble_bits.copy()
+        self._threshold = 0.55 * len(preamble_bits)
 
-        # Background decode thread
+        preamble_hex = ''.join(str(b) for b in preamble_bits[:16])
+        log.info("[RX-INIT] preamble=%s..., threshold=%.2f  code_len=%d  data_chips=%d",
+                 preamble_hex, self._threshold, code_length, frame_coded_bits * code_length)
+
         self._dispatch_queue: queue.Queue = queue.Queue(maxsize=2)
         self._decode_thread = threading.Thread(
             target=self._decode_worker, name="FrameSink-decode", daemon=True
@@ -103,49 +83,36 @@ class FrameSink(gr.sync_block):
     def set_callback(self, fn: Callable) -> None:
         self._callback = fn
 
-    # ------------------------------------------------------------------
-    # GNU Radio work()
-    # ------------------------------------------------------------------
-
     def work(self, input_items, output_items):
         in0 = input_items[0]
-
         if self._state == "SEARCHING":
             if len(in0) > 0:
-                self._np_buf = np.concatenate((self._np_buf, in0))
+                self._buf = np.concatenate((self._buf, in0))
                 self._new_samples += len(in0)
-                # Only search if we have enough new samples to make it worthwhile
                 if self._new_samples >= self._pre_len:
                     self._search()
                     self._new_samples = 0
         else:
             self._fill_collect(in0)
-
         return len(input_items[0])
 
-    # ------------------------------------------------------------------
-    # State: SEARCHING
-    # ------------------------------------------------------------------
-
     def _search(self) -> None:
-        buf = self._np_buf
-        n   = len(buf)
-        pl  = self._pre_len
-
+        buf = self._buf
+        n = len(buf)
+        pl = self._pre_len
         if n < pl:
             return
 
-        ref  = self._preamble
+        # Direct correlation with bipolar preamble reference.
+        ref = self._preamble
         corr = np.correlate(buf, ref, mode='valid')
         peak_idx = int(np.argmax(np.abs(corr)))
         peak_val = float(np.abs(corr[peak_idx]))
-
-        threshold = 0.55 * pl
+        threshold = self._threshold
         self.last_peak = peak_val
         self._search_count += 1
 
-        # Chip-level diagnostics around correlation peak
-        chip_region = buf[peak_idx:peak_idx+pl]
+        chip_region = buf[peak_idx:peak_idx + pl]
         chip_mean = float(np.mean(chip_region))
         chip_std = float(np.std(chip_region))
         chip_abs_mean = float(np.mean(np.abs(chip_region)))
@@ -154,35 +121,58 @@ class FrameSink(gr.sync_block):
         now = time.time()
         if now - self._last_debug_t >= 2.0:
             mean_amp = float(np.mean(np.abs(buf)))
+            max_peak = max(self._peak_history[-100:]) if self._peak_history else 0.0
+            est_signal_amp = max_peak / pl if pl > 0 else 0.0
             log.info(
-                "[RX-DIAG] corr peak=%.2f  threshold=%.2f  mean_amp=%.3f  buf_chips=%d  searches=%d "
+                "[RX-DIAG] corr peak=%.2f  threshold=%.2f  mean_amp=%.3f  "
+                "max_peak=%.2f  est_sig_amp=%.3f  buf_chips=%d  searches=%d "
                 "chip_mean=%.3f  chip_std=%.3f  chip_abs=%.3f  raw_corr=%.2f",
-                peak_val, threshold, mean_amp, n, self._search_count,
-                chip_mean, chip_std, chip_abs_mean, chip_corr,
+                peak_val, threshold, mean_amp, max_peak, est_signal_amp,
+                n, self._search_count, chip_mean, chip_std, chip_abs_mean, chip_corr,
             )
             self._last_debug_t = now
             self._search_count = 0
 
+        self._peak_history.append(peak_val)
+        if len(self._peak_history) > 100:
+            self._peak_history.pop(0)
+
+        near_miss_thresh = 0.30 * threshold
+        if peak_val >= near_miss_thresh and peak_val < threshold:
+            now = time.time()
+            if now - self._last_near_miss_t >= 5.0:
+                self._last_near_miss_t = now
+                peak_region = buf[max(0, peak_idx - 2):peak_idx + pl + 2]
+                log.warning(
+                    "[RX-NEAR-MISS] peak=%.2f  thresh=%.2f  ratio=%.1f%%  "
+                    "chip_abs=%.3f  peak_region=%s",
+                    peak_val, threshold, 100 * peak_val / threshold, chip_abs_mean,
+                    ' '.join(f'{x:+.2f}' for x in peak_region[:min(36, len(peak_region))]),
+                )
+                if self._diag_dir and self._diag_save_idx < 3:
+                    save_path = os.path.join(
+                        self._diag_dir, f"near_miss_{self._diag_save_idx}.npy")
+                    np.save(save_path, buf[peak_idx:peak_idx + pl])
+                    log.warning("[RX-NEAR-MISS] saved chip window to %s", save_path)
+                    self._diag_save_idx += 1
+
         if peak_val >= threshold:
-            noise = float(np.std(np.abs(corr))) + 1e-9
-            snr_val = 20.0 * np.log10(peak_val / (noise * np.sqrt(pl)))
-            
-            if snr_val < 5.0:
-                # False positive due to high noise or adjacent channel bleed
-                self._np_buf = buf[-(pl - 1):].copy()
-                return
+            exclude_start = max(0, peak_idx - pl)
+            exclude_end = min(len(corr), peak_idx + pl)
+            noise_samples = np.concatenate([corr[:exclude_start], corr[exclude_end:]])
+            noise_floor = float(np.std(np.abs(noise_samples))) + 1e-9
+            snr_val = 20.0 * np.log10(peak_val / (noise_floor * np.sqrt(pl)))
 
             self.last_snr = snr_val
             self._polarity = float(np.sign(corr[peak_idx]))
 
             log.info(
-                "[RX-PREAMBLE] peak=%.2f  threshold=%.2f  polarity=%+.0f  snr=%.1f dB  frames_rx=%d",
-                peak_val, threshold, self._polarity, self.last_snr, self.frames_received,
+                "[RX-PREAMBLE] peak=%.2f  threshold=%.2f  polarity=%+.0f  "
+                "snr=%.1f dB  frames_rx=%d",
+                peak_val, threshold, self._polarity,
+                self.last_snr, self.frames_received,
             )
 
-            # Notify hop-controller (and any other listener) that a preamble
-            # was detected. Used by the RX HopController to advance its hop
-            # index and retune the UHD source for the next burst.
             pmsg = pmt.make_dict()
             pmsg = pmt.dict_add(pmsg, pmt.intern("polarity"),
                                 pmt.from_double(self._polarity))
@@ -192,62 +182,44 @@ class FrameSink(gr.sync_block):
 
             data_start = peak_idx + pl
             leftover = buf[data_start:]
-            self._np_buf = _EMPTY.copy()
+            self._buf = _EMPTY.copy()
             self._collect_idx = 0
             self._state = "COLLECTING"
             self._fill_collect(leftover)
         else:
-            # Keep only the tail needed for the next sliding correlation overlap.
-            # (pl - 1) chips ensures that if the preamble started at the very
-            # end of the current buffer, it will be completed in the next one.
-            self._np_buf = buf[-(pl - 1):].copy()
-
-    # ------------------------------------------------------------------
-    # State: COLLECTING
-    # ------------------------------------------------------------------
+            self._buf = buf[-(pl - 1):].copy()
 
     def _fill_collect(self, chips: np.ndarray) -> None:
         remaining = self._data_chips - self._collect_idx
-        take      = min(len(chips), remaining)
-
+        take = min(len(chips), remaining)
         self._collect_buf[self._collect_idx:self._collect_idx + take] = chips[:take]
         self._collect_idx += take
-
         if self._collect_idx >= self._data_chips:
             self._dispatch()
             leftover = chips[take:]
-            # numpy assignment — no Python-level iteration
-            self._np_buf = leftover.copy() if len(leftover) > 0 else _EMPTY.copy()
+            self._buf = leftover.copy() if len(leftover) > 0 else _EMPTY.copy()
             self._state = "SEARCHING"
             self._collect_idx = 0
 
-    # ------------------------------------------------------------------
-    # Despread + dispatch
-    # ------------------------------------------------------------------
-
     def _dispatch(self) -> None:
-        chips     = self._collect_buf[:self._data_chips]
+        chips = self._collect_buf[:self._data_chips]
         soft_bits = self._despread(chips)
         hard_bits = (soft_bits < 0).astype(np.uint8)
-        ts        = time.time()
-        snr       = self.last_snr
-
+        ts = time.time()
+        snr = self.last_snr
         self.frames_received += 1
 
-        # Diagnostics: despreading quality
-        # If despreading works, mean |soft_bit| ≈ code_length (31).
-        # Values near zero indicate chip misalignment, phase error, or wrong code.
         mean_abs_sb = float(np.mean(np.abs(soft_bits)))
         min_sb = float(np.min(soft_bits))
         max_sb = float(np.max(soft_bits))
         sb_std = float(np.std(soft_bits))
         log.info(
-            "[RX-DIAG2] frame=%d  mean_abs_soft=%.1f  range=[%.1f, %.1f]  std=%.1f  code_len=%d",
+            "[RX-DIAG2] frame=%d  mean_abs_soft=%.1f  range=[%.1f, %.1f]  "
+            "std=%.1f  code_len=%d",
             self.frames_received, mean_abs_sb, min_sb, max_sb, sb_std, self._code_len,
         )
 
         self.message_port_pub(pmt.intern("frame_complete"), pmt.PMT_T)
-
         if self._callback:
             try:
                 self._dispatch_queue.put_nowait((hard_bits, ts, snr))
@@ -255,7 +227,6 @@ class FrameSink(gr.sync_block):
                 pass
 
     def _decode_worker(self) -> None:
-        """Background thread: drains dispatch queue and invokes callback."""
         while True:
             try:
                 item = self._dispatch_queue.get(timeout=1.0)
@@ -266,14 +237,11 @@ class FrameSink(gr.sync_block):
                 try:
                     self._callback(hard_bits, ts, snr)
                 except Exception as exc:
-                    log.error("[RX-DECODE] callback exception: %s", exc, exc_info=True)
+                    log.error("[RX-DECODE] callback exception: %s", exc,
+                              exc_info=True)
 
     def _despread(self, chips: np.ndarray) -> np.ndarray:
-        """
-        Integrate-and-dump: reshape chips into (n_bits, code_length) and
-        dot each row with the bipolar spreading code → one soft bit per row.
-        """
-        cl     = self._code_len
+        cl = self._code_len
         n_bits = len(chips) // cl
         matrix = chips[:n_bits * cl].reshape(n_bits, cl)
         return (matrix @ self._code) * self._polarity

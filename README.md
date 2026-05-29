@@ -1,68 +1,129 @@
-# Surrogate Datalink System
+# Surrogate Datalink Workbench
 
-A configurable bidirectional missile datalink surrogate implemented in Python and GNU Radio, targeting USRP B205/B210 software-defined radios. Emulates FHSS+DSSS burst transmissions with full control over RF parameters, spreading codes, FEC, frame structure, anomaly injection, and IQ recording.
+A configurable Python/GNU Radio datalink workbench for building, transmitting,
+receiving, and inspecting framed RF signals. The project targets USRP
+B205/B210 hardware, but the current development path deliberately starts with
+pure Python profile tests and no-hardware simulation before RF integration.
 
-## Features
+The long-term goal is a profile-driven system where a YAML file can define the
+exact datalink shape: preamble, syncword, header fields, header CRC, payload
+CRC, payload FEC, whitening, padding, modulation, spreading, hopping, RF
+frequency, and runtime behavior.
 
-- **Bidirectional FHSS** — Baseband digital frequency hopping via complex rotation. No RF retunes, no command bus traffic, no PLL settling. TX/RX synchronized by construction.
-- **DSSS spreading** — Gold codes, m-sequences, Kasami codes, or custom codes; chip rates up to ~10 Mchip/s.
-- **Burst mode** — Timed gate with configurable duration, preamble, and guard intervals.
-- **FEC** — Convolutional K=7 rate-1/2 (NASA polynomials) with optional Reed-Solomon outer code.
-- **Modulation** — BPSK, QPSK, OQPSK, GMSK/MSK.
-- **Simulation Mode** — Integrated ZMQ-based loopback for testing logic and protocols without SDR hardware.
-- **Custom Payloads** — Support for hex-encoded custom payloads per burst.
-- **IQ recording** — Real-time start/stop for cf32, i8, and SigMF formats.
-- **PyQt5 GUI** — Thread-safe live parameter updates and real-time payload monitoring.
+For the detailed roadmap, see [MASTER_PLAN.md](MASTER_PLAN.md). For the running
+engineering log, see [WORK_DIARY.md](WORK_DIARY.md).
+
+## Current State
+
+The repo now has two important tracks:
+
+- **Existing RF runtime:** GNU Radio TX/RX flowgraphs, PyQt GUI, baseband FHSS,
+  DSSS/FEC pieces, IQ recording, and USRP diagnostics.
+- **New profile foundation:** a pure Python datalink profile engine in
+  `core/datalink_profile.py`, with tests and a checked-in example profile at
+  `config/profiles/bpsk_static_v1.yaml`.
+
+The profile engine is intentionally independent of GNU Radio and hardware. It
+can build and parse framed payloads from YAML-style profiles and already
+supports:
+
+- exact preamble and syncword bits
+- uint header fields
+- raw payload length semantics
+- auto-increment counters
+- header CRC
+- payload CRC
+- padding
+- optional convolutional K=7 rate 1/2 FEC
+- optional matrix interleaving
+- optional LFSR whitening
+- inverted-frame handling
+- derived frame and encoded-payload lengths
+
+## Quick Checks
+
+Run the current no-hardware checks:
+
+```bash
+python3 -m unittest discover -v
+python3 -m compileall -q core radio gui logging_module main.py diagnose_link.py test_rx_power.py tests tools
+```
+
+Run the profile smoke command:
+
+```bash
+python3 tools/profile_smoke.py config/profiles/bpsk_static_v1.yaml --payload-text hello --id 42
+```
+
+Expected output is JSON with `ok: true`, header fields, CRC/FEC status, frame
+length, and encoded payload length.
+
+## Running The Existing App
+
+```bash
+# GUI mode
+python3 main.py
+
+# Headless mode
+python3 main.py --no-gui
+
+# Custom config
+python3 main.py --config config/default_config.yaml
+```
+
+The existing GUI/runtime still uses the older `config/default_config.yaml`
+configuration path. The new `config/profiles/*.yaml` profile system is not yet
+wired into the GNU Radio flowgraphs.
 
 ## Hardware Requirements
 
-- **Recommended**: 1× USRP B210 (single-radio mode uses both 2T2R ports).
-- **Setup**: Port A (RF0) for TX, Port B (RF1) for RX. Cable RF0 TX/RX → RF1 RX2 (with 60 dB attenuation).
-- Ubuntu 22.04 or 24.04, USB 3.0.
+Recommended bench setup:
 
-## Running
+- 1x USRP B210
+- TX on channel/port A
+- RX on channel/port B
+- RF loopback cable with appropriate attenuation
+- Ubuntu 22.04/24.04, GNU Radio 3.10+, UHD 4.0+
 
-```bash
-# GUI mode (default)
-python main.py
-
-# Headless/CLI mode
-python main.py --no-gui
-```
-
-### Simulation Mode
-To run without hardware:
-1. Go to the **RF** tab.
-2. Check **Simulation Mode**.
-3. Click **Apply**.
-The system will use ZMQ to loop back the signal internally.
-
-## Configuration
-
-### Hardware Ports (`rf`)
-- `tx_channel`: 0 (Port A), 1 (Port B)
-- `rx_channel`: 0 (Port A), 1 (Port B)
-- `tx_antenna`: "TX/RX"
-- `rx_antenna`: "RX2" or "TX/RX"
-
-### Modulation (`modulation`)
-- `type`: `bpsk`, `qpsk`, `oqpsk`, `msk`, `gmsk`.
-- **Note**: OQPSK uses coherent RRC matched filter + M&M timing recovery; GMSK/MSK use non-coherent demodulation.
-
-### Hopping (`hopping`)
-- **Baseband digital FHSS**: Both TX and RX stay on a single fixed RF center frequency. Hopping is a complex rotation per sample in baseband. No timed UHD commands.
-- `sample_rate`: Must be ≥ 2 × |Δf_max|. Default hop set (±700 kHz at 915 MHz) requires **2.0 MHz**.
-- `transition_time_ms`: Recommended **10.0 ms** guard interval.
+Never connect TX directly to RX without attenuation.
 
 ## Project Structure
 
-- `core/`: Pure Python signal processing logic (FEC, spreading, scheduling).
-- `radio/`: GNU Radio flowgraphs and hardware interface.
-- `radio/blocks/`: Custom C++/Python blocks (BasebandHopper, FrameSink, BurstGate).
-- `gui/`: PyQt5 user interface.
+```text
+core/
+  datalink_profile.py     Pure YAML-style frame/profile engine
+  fec_codec.py            Convolutional and Reed-Solomon FEC
+  frame_generator.py      Existing legacy/current frame builder
+  spreading_codes.py      Gold, m-sequence, Kasami, custom codes
+  hop_scheduler.py        Hop sequence generation
 
-## Recent Architectural Changes
-- **Baseband Digital FHSS**: Replaced RF-timed retune approach (saturated USB control bus, TX/RX freq mismatch, crashes) with per-sample complex rotation. Both TX and RX stay on a single fixed center frequency; `BasebandHopper` applies `exp(±j * 2π * Δf_k * t)` to implement hopping without any UHD command traffic.
-- **Heartbeat TX**: The transmitter runs a continuous low-level noise stream ("heartbeat") to keep the GR scheduler fed even between bursts.
-- **Qt Signals**: All frame dispatching uses Qt Signals to ensure thread-safe GUI updates.
-- **Invariant Sync**: Every frame is verified against a 16-bit invariant (0x1234) and handles 180° phase inversions automatically.
+config/
+  default_config.yaml     Existing GUI/runtime config
+  profiles/               New datalink profile YAML files
+
+radio/
+  flowgraph_manager.py    Existing TX/RX lifecycle manager
+  tx_flowgraph.py         Existing GNU Radio TX path
+  rx_flowgraph.py         Existing GNU Radio RX path
+  blocks/                 Custom GNU Radio blocks
+
+gui/                      PyQt5 interface
+logging_module/           File/CSV logging
+tests/                    No-hardware tests
+tools/                    Developer/operator utility commands
+```
+
+## Useful References
+
+- [MASTER_PLAN.md](MASTER_PLAN.md): architecture, frame model, milestones
+- [WORK_DIARY.md](WORK_DIARY.md): chronological development diary
+- [CLAUDE.md](CLAUDE.md): coding-agent operating notes
+- [llm-handover.md](llm-handover.md): older handover notes from prior passes
+
+## Development Notes
+
+- Keep protocol/framing logic pure and testable.
+- Do not make GNU Radio own the frame grammar.
+- Prefer adding no-hardware tests before touching RF behavior.
+- Treat existing unstaged RF/modulation edits as pending review work, not trash.
+- Commit small, named checkpoints before major integration steps.

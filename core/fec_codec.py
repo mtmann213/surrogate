@@ -110,9 +110,11 @@ class ConvolutionalCodec:
             path_metrics = np.where(sel, m1, m0)
             survivors[step] = np.where(sel, self._pred1, self._pred0)
 
-        # Traceback from state 0 (encoder tail-flushed to all-zeros)
+        # Traceback from the best final state. The encoder appends K-1 zero
+        # tail bits, which flushes memory but does not force this full-register
+        # state convention to numeric state 0 for every input length.
         decoded = np.empty(n_bits, dtype=np.uint8)
-        state = 0
+        state = int(np.argmin(path_metrics))
         for step in range(n_bits - 1, -1, -1):
             prev           = int(survivors[step, state])
             decoded[step]  = (state >> (self.K - 1)) & 1

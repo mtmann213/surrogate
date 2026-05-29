@@ -1,0 +1,85 @@
+profile:
+  name: bpsk_static_v1
+  version: 1
+
+frame:
+  bit_order: msb_first
+  preamble:
+    type: constant_bits
+    bits: "10101010101010101010101010101010"
+  syncword:
+    type: constant_bits
+    bits: "00111101010011000101101101101010"
+    rx_sync: true
+    max_bit_errors: 2
+    allow_inverted: true
+  header:
+    fields:
+      - {name: length, type: uint, bits: 16, value_from: payload.length_bytes}
+      - {name: id, type: uint, bits: 8, default: 1}
+      - {name: counter, type: uint, bits: 16, auto_increment: true}
+      - {name: flags, type: uint, bits: 8, default: 0}
+  header_crc:
+    enabled: true
+    algorithm: crc16_ccitt
+    over: [header]
+  payload:
+    max_bytes: 128
+  payload_crc:
+    enabled: true
+    algorithm: crc32
+    over: [payload]
+  padding:
+    mode: custom_byte
+    byte: 0x00
+    align_bits: 8
+
+coding:
+  fec:
+    scope: payload_region
+    type: convolutional_k7_r12
+    constraint_length: 7
+    polynomials: [121, 91]
+  interleaving:
+    enabled: false
+    type: matrix
+    rows: 8
+  whitening:
+    enabled: true
+    type: lfsr
+    seed: 0x7f
+    mask: 0x48
+
+waveform:
+  modulation:
+    type: bpsk
+    bit_rate_bps: 12500
+    chip_rate_sps: 250000
+    pulse_shaping:
+      type: rrc
+      rolloff: 0.35
+      span_symbols: 11
+  spreading:
+    enabled: false
+    type: none
+  hopping:
+    enabled: false
+    type: custom
+    frequencies_hz: [915000000.0]
+    transition_time_ms: 10.0
+
+rf:
+  simulation: true
+  center_frequency_hz: 915000000.0
+  sample_rate_sps: 1000000.0
+  tx_gain_db: 50.0
+  rx_gain_db: 50.0
+  tx_channel: 0
+  rx_channel: 1
+  tx_antenna: TX/RX
+  rx_antenna: RX2
+
+rx:
+  preamble_clock_recovery: true
+  sync_on: syncword
+  allow_phase_inversion: true

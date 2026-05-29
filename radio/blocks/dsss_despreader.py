@@ -51,7 +51,7 @@ class DSSSDespreader(gr.basic_block):
             self._code_len = len(code)
             self._locked = False
 
-   def forecast(self, noutput_items, ninputs):
+    def forecast(self, noutput_items, ninputs):
         return [noutput_items * self._code_len]
 
     def general_work(self, input_items, output_items):

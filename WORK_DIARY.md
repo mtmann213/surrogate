@@ -254,15 +254,40 @@ python3 -m compileall -q core radio gui logging_module main.py diagnose_link.py 
 
 Passed.
 
+## 2026-06-01 - Config Symbol-Rate Checkpoint
+
+### Goal
+
+Stabilize the pure config/stat math introduced by the dirty modulation thread
+before reviewing GUI and GNU Radio wiring.
+
+### Changes
+
+- Reused the modulation helper registry for `bits_per_symbol`.
+- Derived `symbol_rate` as `chip_rate_sps / bits_per_symbol`.
+- Kept samples-per-symbol snapping based on symbol rate.
+- Reported hardware bandwidth from the derived RF config instead of assuming
+  `sample_rate / 2`.
+- Added regression tests for BPSK/QPSK/8PSK/DPSK symbol-rate derivation, stats,
+  and chip-rate snapping.
+
+### Verification
+
+```bash
+python3 -m unittest discover -v
+python3 -m compileall -q core radio gui logging_module main.py diagnose_link.py test_rx_power.py tests tools
+```
+
+Passed.
+
 Recommendation:
 
 1. Do not revert casually.
-2. Review as a separate RF/modulation workstream.
-3. Add tests for modulation/demodulation helpers if they are kept.
-4. Split into clean commits before profile-to-RF integration.
+2. Keep reviewing the remaining GUI and GNU Radio edits as a separate
+   RF/modulation workstream.
+3. Split remaining changes into clean commits before profile-to-RF integration.
 
 ## Next Suggested Step
 
-Review and stabilize the dirty RF/modulation edits, starting with the pure
-`core/modulation.py` and `core/demodulation.py` helpers because they can be
-tested without hardware.
+Review and stabilize the dirty GUI/runtime RF edits, starting with
+`radio/blocks/frame_sink.py` and the TX/RX 8PSK flowgraph wiring.

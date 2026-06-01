@@ -12,6 +12,8 @@ from typing import Any, Callable, Dict, List, Optional
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
+from core.modulation import BITS_PER_SYMBOL
+
 log = logging.getLogger(__name__)
 
 
@@ -80,11 +82,25 @@ class PulseShapingConfig(BaseModel):
 
 
 class ModulationConfig(BaseModel):
-    type: str = "bpsk"          # bpsk | qpsk | oqpsk | msk | gmsk
+    type: str = "bpsk"          # bpsk | qpsk | 8psk | dbpsk | dqpsk | d8psk | fsk
     bit_rate_bps: float = 50000.0
     chip_rate_sps: float = 1.0e6
     spreading: SpreadingConfig = Field(default_factory=SpreadingConfig)
     pulse_shaping: PulseShapingConfig = Field(default_factory=PulseShapingConfig)
+
+    @property
+    def bits_per_symbol(self) -> int:
+        """Number of bits carried per symbol for the current modulation type."""
+        return BITS_PER_SYMBOL.get(self.type, 1)
+
+    @property
+    def symbol_rate(self) -> float:
+        """Symbol (baud) rate derived from chip rate and modulation order.
+
+        For BPSK: 1 chip = 1 symbol, so symbol_rate = chip_rate.
+        For 8PSK: 3 chips = 1 symbol, so symbol_rate = chip_rate / 3.
+        """
+        return self.chip_rate_sps / self.bits_per_symbol
 
 
 class TimingConfig(BaseModel):
@@ -183,6 +199,12 @@ class LoggingConfig(BaseModel):
     iq_recording: IQRecordingConfig = Field(default_factory=IQRecordingConfig)
 
 
+def _ensure_dict(obj):
+    """Convert Pydantic model to dict if needed."""
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    return obj
+
 def _derive_frame_params(data: dict) -> dict:
     """
     Compute burst_duration_ms and RF bandwidth from frame/modulation config.
@@ -191,24 +213,27 @@ def _derive_frame_params(data: dict) -> dict:
     burst_duration_ms must exactly match the chip count or BurstGate will clip
     frames (the primary cause of low packet delivery if misconfigured).
     """
-    mod = data.get("modulation", {})
-    frame_d = data.get("frame", {})
-    rf = data.get("rf", {})
+    mod = _ensure_dict(data.get("modulation", {}))
+    frame_d = _ensure_dict(data.get("frame", {}))
+    rf = _ensure_dict(data.get("rf", {}))
 
     sample_rate = float(rf.get("sample_rate", 8.0e6))
     chip_rate   = float(mod.get("chip_rate_sps", 1.0e6))
+    mod_type    = mod.get("type", "bpsk")
+    bps         = BITS_PER_SYMBOL.get(mod_type, 1)
+    symbol_rate = chip_rate / float(bps)
 
     # When hopping is enabled, ensure sample_rate satisfies Nyquist for
-    # the baseband digital FHSS rotation.  The rotated signal spans
-    # [Δf - BW/2, Δf + BW/2] where BW = chip_rate * (1+rolloff).
-    # Minimum sample_rate = 2 * max(|Δf| + BW/2) = 2 * |Δf_max| + BW.
+    # the baseband digital FHSS rotation. The rotated signal spans
+    # [df - BW/2, df + BW/2] where BW = symbol_rate * (1+rolloff).
+    # Minimum sample_rate = 2 * max(|df| + BW/2) = 2 * |df_max| + BW.
     hopping = data.get("hopping", {})
     if hopping.get("enabled", False):
         hop_freqs = hopping.get("hop_frequencies", [])
         center = rf.get("center_frequency", 0.0)
         ps = mod.get("pulse_shaping", {})
         rolloff = float(ps.get("rolloff", 0.35))
-        sig_bw = chip_rate * (1.0 + rolloff)
+        sig_bw = symbol_rate * (1.0 + rolloff)
         if hop_freqs and center > 0:
             max_df = max(abs(float(f) - center) for f in hop_freqs)
             min_sr = 2.0 * max_df + sig_bw
@@ -216,13 +241,14 @@ def _derive_frame_params(data: dict) -> dict:
                 sample_rate = min_sr * 1.1  # 10% margin
                 data.setdefault("rf", {})["sample_rate"] = sample_rate
 
-    # Snap chip_rate so sps = sample_rate / chip_rate is a positive integer.
-    # Non-integer sps makes int(sps) truncate in the RRC interpolation filter,
-    # causing the actual output sample rate to differ from sample_rate.
-    sps_raw = sample_rate / chip_rate
+    # Snap sps = sample_rate / symbol_rate to integer.
+    # sps = sample_rate / (chip_rate / bps) = sample_rate * bps / chip_rate
+    # Non-integer sps truncates in the RRC interpolation filter, distorting output.
+    sps_raw = sample_rate * float(bps) / chip_rate
     sps_int = max(1, round(sps_raw))
     if abs(sps_raw - sps_int) > 0.02:
-        chip_rate = sample_rate / sps_int
+        chip_rate = sample_rate * float(bps) / sps_int
+        chip_rate = max(1.0, chip_rate)
         data.setdefault("modulation", {})["chip_rate_sps"] = chip_rate
 
     preamble  = frame_d.get("preamble", {})
@@ -261,11 +287,12 @@ def _derive_frame_params(data: dict) -> dict:
     total_chips = pre_bits + coded_bits * code_length
     burst_ms    = total_chips / chip_rate * 1000.0
 
-    # Hardware analog filter bandwidth: use sample_rate/2 so it never clips the
-    # signal. The software RRC filter already band-limits to chip_rate*(1+rolloff).
-    # Setting hardware BW = chip_rate*(1+rolloff) is too tight: the AD9361 filter
-    # has ~10-15% accuracy and introduces ISI at narrow settings.
-    bw = sample_rate / 2.0
+    # Hardware analog filter bandwidth: set to sample_rate so the full
+    # RRC-filtered signal bandwidth (chip_rate*(1+rolloff)) passes through
+    # the AD9361 LPF without truncation.  At 500 kHz sample rate with
+    # chip_rate=250 kHz and rolloff=0.35, the signal BW is 337.5 kHz,
+    # and sample_rate=500 kHz (Nyquist limit) covers it with margin.
+    bw = sample_rate
 
     data.setdefault("timing", {})["burst_duration_ms"] = burst_ms
     data.setdefault("rf", {})["tx_bandwidth"] = bw
@@ -303,9 +330,10 @@ def compute_frame_stats(cfg: "SurrogateConfig") -> Dict:
     burst_ms        = cfg.timing.burst_duration_ms
     period_ms       = burst_ms + cfg.timing.transition_time_ms
     throughput      = frame.payload_bits / (period_ms / 1000.0)
-    sps             = rf.sample_rate / chip_rate
-    signal_bw       = chip_rate * (1.0 + mod.pulse_shaping.rolloff)
-    hw_bw           = rf.sample_rate / 2.0
+    symbol_rate     = chip_rate / mod.bits_per_symbol
+    sps             = rf.sample_rate / symbol_rate
+    signal_bw       = symbol_rate * (1.0 + mod.pulse_shaping.rolloff)
+    hw_bw           = rf.tx_bandwidth
     proc_gain_db    = 10.0 * __import__("math").log10(code_length)
 
     return {

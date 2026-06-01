@@ -6,8 +6,8 @@ rf:
   b210_ref_source: internal
   center_frequency: 915000000.0
   sample_rate: 1000000.0
-  tx_gain: 35.0
-  rx_gain: 35.0
+  tx_gain: 45.0
+  rx_gain: 45.0
   tx_channel: 0
   rx_channel: 1
   tx_antenna: TX/RX

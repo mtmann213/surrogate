@@ -350,3 +350,37 @@ python3 -c "... construct TXFlowgraph/RXFlowgraph in simulation mode ..."
 ```
 
 Passed for BPSK at 1 MS/s and 250 kchip/s.
+
+## 2026-06-01 - First Successful B210 Loopback
+
+### Result
+
+The first BPSK hardware loopback succeeded on the B210 with RF0 `TX/RX` cabled
+to RF1 `RX2` through 60 dB attenuation.
+
+### Tuning Notes
+
+- 35/35 dB TX/RX gain produced visible but weak correlation:
+  peak around 5.8 against a 17.6 threshold, with no decoded frames.
+- 45/45 dB TX/RX gain produced stable preamble detections:
+  peaks around 26-29 against a 17.6 threshold.
+- Recovered frames reported `FEC=OK` with payload matching the transmitted
+  `00010203...` pattern.
+- Observed SNR was roughly 11-12 dB during the successful run.
+- Soft despread magnitudes were around 23-25 with code length 31.
+
+### Current Working Bench Config
+
+- B210 serial: `34D6458`
+- TX gain: 45 dB
+- RX gain: 45 dB
+- Sample rate: 1 MS/s
+- Chip rate: 250 kchip/s
+- Modulation: BPSK
+- Hopping: disabled
+
+### Next RF Steps
+
+1. Run a longer static BPSK soak and record delivery/decode rates after startup.
+2. Reduce startup loss by delaying TX feeder start until RX is fully settled.
+3. Re-enable baseband hopping after static BPSK is stable.

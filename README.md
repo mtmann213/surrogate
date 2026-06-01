@@ -2,8 +2,8 @@
 
 A configurable Python/GNU Radio datalink workbench for building, transmitting,
 receiving, and inspecting framed RF signals. The project targets USRP
-B205/B210 hardware, but the current development path deliberately starts with
-pure Python profile tests and no-hardware simulation before RF integration.
+B205/B210 hardware, with a staged path from pure Python profile tests to
+simulation, cabled bench loopback, and eventually over-the-air operation.
 
 The long-term goal is a profile-driven system where a YAML file can define the
 exact datalink shape: preamble, syncword, header fields, header CRC, payload
@@ -15,13 +15,17 @@ engineering log, see [WORK_DIARY.md](WORK_DIARY.md).
 
 ## Current State
 
-The repo now has two important tracks:
+The repo now has three important tracks:
 
 - **Existing RF runtime:** GNU Radio TX/RX flowgraphs, PyQt GUI, baseband FHSS,
   DSSS/FEC pieces, IQ recording, and USRP diagnostics.
 - **New profile foundation:** a pure Python datalink profile engine in
   `core/datalink_profile.py`, with tests and a checked-in example profile at
   `config/profiles/bpsk_static_v1.yaml`.
+- **Bench RF baseline:** static BPSK has been validated on a cabled B210
+  loopback. Runtime QPSK support is implemented and ready for the next cabled
+  hardware check. 8PSK and differential PSK helpers exist, but those modes are
+  intentionally not enabled in the live GNU Radio runtime yet.
 
 The profile engine is intentionally independent of GNU Radio and hardware. It
 can build and parse framed payloads from YAML-style profiles and already
@@ -39,6 +43,47 @@ supports:
 - optional LFSR whitening
 - inverted-frame handling
 - derived frame and encoded-payload lengths
+
+The existing GUI/runtime still uses `config/default_config.yaml`; the new
+`config/profiles/*.yaml` profile system is not yet wired into the GNU Radio
+flowgraphs.
+
+## Current RF Runtime Baseline
+
+Validated static loopback setup:
+
+- USRP B210 serial `34D6458`
+- RF0 `TX/RX` cabled to RF1 `RX2`
+- 60 dB inline attenuation
+- 915 MHz center frequency
+- 1 MS/s sample rate
+- 250 kchip/s chip rate
+- TX/RX gains around 45/45 dB
+- BPSK modulation
+- hopping disabled
+- 60 uncounted TX warmup frames before official frame #0
+
+Runtime modulation state:
+
+- `bpsk`: implemented and hardware-validated on the bench setup above
+- `qpsk`: implemented in TX/RX flowgraphs and construction-tested; next step is
+  cabled B210 validation
+- `8psk`, `dbpsk`, `dqpsk`, `d8psk`: pure helpers/config math exist, but live
+  GNU Radio runtime support remains gated until QPSK is proven and diagnostics
+  are stronger
+
+Current link diagnostics include TX frames, RX preamble/frame detections, FEC
+OK/ERR counts, packet delivery estimate, detection rate, decode rate, SNR,
+preamble correlation peak/threshold, phase correction, despread soft metrics,
+payload previews, and recent GUI events.
+
+Current diagnostic gaps:
+
+- no truth-based BER counter yet
+- no explicit payload-match percentage against the known TX pattern yet
+- no FEC correction-count metric yet; `rx_fec_ok` means the decoded payload
+  passed the current FEC/parse path, not that we know how many errors were
+  corrected
 
 ## Quick Checks
 
@@ -71,18 +116,19 @@ python3 main.py --no-gui
 python3 main.py --config config/default_config.yaml
 ```
 
-The existing GUI/runtime still uses the older `config/default_config.yaml`
-configuration path. The new `config/profiles/*.yaml` profile system is not yet
-wired into the GNU Radio flowgraphs.
+For QPSK validation, switch `modulation.type` in `config/default_config.yaml`
+from `bpsk` to `qpsk` or use the GUI modulation selector, then run the same
+static cabled loopback before trying hopping or 8PSK.
 
 ## Hardware Requirements
 
 Recommended bench setup:
 
 - 1x USRP B210
-- TX on channel/port A
-- RX on channel/port B
-- RF loopback cable with appropriate attenuation
+- TX on RF0 `TX/RX`
+- RX on RF1 `RX2`
+- RF loopback cable with appropriate attenuation; 60 dB worked for the current
+  B210 bench
 - Ubuntu 22.04/24.04, GNU Radio 3.10+, UHD 4.0+
 
 Never connect TX directly to RX without attenuation.
@@ -125,5 +171,4 @@ tools/                    Developer/operator utility commands
 - Keep protocol/framing logic pure and testable.
 - Do not make GNU Radio own the frame grammar.
 - Prefer adding no-hardware tests before touching RF behavior.
-- Treat existing unstaged RF/modulation edits as pending review work, not trash.
 - Commit small, named checkpoints before major integration steps.

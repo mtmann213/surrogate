@@ -19,6 +19,34 @@ The system should let an operator define, from configuration, the exact structur
 
 The near-term target is a practical, stable, testable BPSK datalink over a single-machine USRP B210 loopback. The long-term target is a profile-driven waveform workbench that supports multiple modulation and coding schemes, spread spectrum, baseband FHSS, superframes, and over-the-air synchronization.
 
+## Current Checkpoint: 2026-06-01
+
+Completed:
+
+- Clean compile/test baseline and generated-artifact cleanup.
+- Pure YAML-style profile frame engine with header fields, header CRC, payload
+  CRC, padding, optional convolutional FEC, interleaving, whitening, and tests.
+- Static BPSK cabled B210 loopback at 915 MHz with RF0 `TX/RX` to RF1 `RX2`
+  through 60 dB attenuation.
+- Startup conditioning through uncounted TX warmup frames.
+- Runtime QPSK TX/RX path using packed chip pairs and the existing chip-oriented
+  frame sink.
+
+Current live RF status:
+
+- `bpsk` is hardware-validated on the current bench.
+- `qpsk` is implemented and construction-tested; the next RF task is cabled
+  hardware validation.
+- `8psk` and DPSK helpers exist in pure code, but runtime flowgraph support is
+  intentionally gated until QPSK has been validated and link-quality metrics are
+  less ambiguous.
+
+Current diagnostics are useful but incomplete. The runtime reports detected
+frames, FEC OK/ERR, SNR, preamble correlation, phase correction, soft metrics,
+delivery estimate, detection rate, and decode rate. It does not yet report a
+truth-based BER, explicit payload-match percentage, or number of FEC-corrected
+errors.
+
 ## 2. Guiding Principles
 
 ### 2.1 YAML Profile Is The Source Of Truth
@@ -630,8 +658,8 @@ V1.1:
 
 V2 practical modulation set:
 
-- QPSK
-- 8PSK
+- QPSK, now implemented in the runtime and pending cabled RF validation
+- 8PSK, next after QPSK plus payload/BER diagnostics
 - GMSK
 - FSK
 
@@ -764,6 +792,8 @@ Required tests:
 - RX power/tone check
 - Static BPSK frame delivery
 - Static BPSK with coding
+- Static QPSK frame delivery
+- Static 8PSK frame delivery after QPSK is stable
 - Baseband FHSS BPSK delivery
 - IQ recording smoke test
 
@@ -785,6 +815,9 @@ Metrics:
 - Header CRC pass/fail
 - Payload CRC pass/fail
 - FEC pass/fail
+- Payload match pass/fail against expected loopback payloads
+- Payload bit errors and BER when a known payload pattern is active
+- FEC corrected-error count when the decoder can expose it
 - Delivery percentage
 - Decode percentage
 - SNR or soft confidence
@@ -929,6 +962,13 @@ Exit criteria:
 - IQ recording works
 - Metrics are visible in logs/status
 
+Status:
+
+- Static BPSK loopback is working on the B210 bench setup.
+- Metrics are visible in logs/status.
+- IQ recording and richer BER/payload-match metrics still need explicit
+  validation.
+
 ### Milestone 4: BPSK Baseband FHSS
 
 Exit criteria:
@@ -952,6 +992,14 @@ Exit criteria:
 - QPSK, 8PSK, GMSK, and FSK profiles can be tested
 - Each modulation has simulation tests before hardware claims
 
+Status:
+
+- QPSK runtime flowgraph support is implemented and awaiting cabled RF
+  validation.
+- 8PSK should follow QPSK validation. The current frame chip count is compatible
+  with 3-chip symbol packing, but 8PSK needs more SNR/phase margin and better
+  BER/payload-match reporting before performance claims are meaningful.
+
 ### Milestone 7: Superframes And Fragmentation
 
 Exit criteria:
@@ -971,11 +1019,12 @@ Exit criteria:
 
 ## 17. Immediate Next Step
 
-The next practical engineering step is Milestone 0:
+The next practical engineering step is a focused RF/diagnostics phase:
 
-1. Fix or quarantine the syntax-broken legacy despreader.
-2. Establish clean compile.
-3. Add `.gitignore` coverage for generated artifacts if needed.
-4. Decide whether to import `surrogate-qwen` test-runner diagnostics now or after the frame engine exists.
-
-After that, implement Milestone 1 as pure protocol code before touching more RF behavior.
+1. Run static cabled QPSK on the same B210 loopback that validated BPSK.
+2. Add truth-based payload diagnostics: expected payload comparison, bit-error
+   count, BER, payload match percentage, and sequence-aware loss accounting.
+3. If QPSK is stable, add runtime 8PSK using the same packed-chip architecture,
+   plus frame-alignment validation for groups of 3 chips.
+4. Revisit baseband FHSS only after static PSK modes have measurable link
+   quality.

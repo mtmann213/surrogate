@@ -535,3 +535,27 @@ TX/RX flowgraphs.
 
 Run cabled B210 static QPSK with the existing 60 dB attenuation and warmup
 frames before attempting 8PSK or hopping.
+
+## 2026-06-01 - Documentation Refresh For RF Baseline
+
+### Goal
+
+Bring the reference docs up to the actual project state before adding more
+modulation modes.
+
+### Changes
+
+- Updated `README.md` with the validated BPSK bench baseline, QPSK runtime
+  status, gated 8PSK/DPSK status, hardware setup, and current diagnostics.
+- Updated `CLAUDE.md` so future coding agents start from the current RF
+  checkpoint instead of the older profile-foundation checkpoint.
+- Updated `MASTER_PLAN.md` with the 2026-06-01 checkpoint, milestone status,
+  QPSK/8PSK order, and diagnostics gaps.
+
+### Decision
+
+Do not treat the current diagnostics as BER proof. The runtime has useful link
+health telemetry, but the next metrics checkpoint should add known-payload
+comparison, payload bit-error counts, payload match rate, and sequence-aware
+loss accounting. FEC OK/ERR counts are not enough to say how many bits were
+corrected.

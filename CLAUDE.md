@@ -19,8 +19,11 @@ Read these first:
 
 Recent checkpoint commits:
 
+- `51cc541 Add runtime QPSK path`
+- `584698c Record warmup loopback result`
+- `e003c28 Add uncounted TX warmup frames`
+- `c49b44f Record successful BPSK loopback gains`
 - `7968f1a Establish datalink profile foundation`
-- `d4ebd33 Add profile smoke command`
 
 Current no-hardware verification:
 
@@ -34,6 +37,30 @@ Profile smoke check:
 ```bash
 python3 tools/profile_smoke.py config/profiles/bpsk_static_v1.yaml --payload-text hello --id 42
 ```
+
+Current RF baseline:
+
+- Static BPSK cabled B210 loopback is working.
+- Known-good bench setup: B210 serial `34D6458`, RF0 `TX/RX` to RF1 `RX2`,
+  60 dB attenuation, 915 MHz, 1 MS/s, 250 kchip/s, TX/RX gain around 45/45 dB,
+  hopping disabled, 60 TX warmup frames.
+- Runtime QPSK is implemented in the GNU Radio TX/RX path and construction
+  tested, but still needs cabled RF validation.
+- Runtime 8PSK and DPSK modes are deliberately gated in
+  `radio/runtime_modulation.py` until QPSK is proven and better quality metrics
+  are present.
+
+Current diagnostics:
+
+- `radio/flowgraph_manager.py` tracks TX frames, RX detected frames,
+  `rx_fec_ok`, `rx_fec_err`, TX/RX rates, SNR history, packet-loss estimate,
+  detection rate, and FEC OK rate.
+- `radio/blocks/frame_sink.py` logs preamble correlation, threshold, phase
+  correction, SNR, and despread soft-value diagnostics.
+- The GUI status panel displays delivery/PDR, detect, decode, FEC OK/ERR, SNR,
+  and rates.
+- Missing: truth-based BER, explicit payload-match percentage, sequence-aware
+  loss accounting, and FEC correction-count reporting.
 
 ## Architecture Direction
 
@@ -110,23 +137,6 @@ python3 test_rx_power.py
 - `radio/blocks/baseband_hopper.py` - baseband digital FHSS
 - `radio/blocks/frame_sink.py` - existing preamble/despread/FEC sink
 
-## Current Dirty Worktree Note
-
-After the profile foundation commits, there are still unstaged pre-existing
-edits in config/radio/gui/core files, plus untracked `core/modulation.py` and
-`core/demodulation.py`.
-
-Recommendation:
-
-- Do not revert them casually.
-- Treat them as pending RF/modulation work.
-- Review and split into clean commits before wiring the new profile engine into
-  GNU Radio.
-
-The edits appear to include useful work: symbol-rate handling, 8PSK/differential
-modulation helpers, complex `FrameSink` phase correction, baseband hopper
-changes, and status metrics.
-
 ## Style And Safety
 
 - Prefer `rg`/`sed` for inspection.
@@ -139,8 +149,13 @@ changes, and status metrics.
 
 ## Near-Term Next Steps
 
-1. Review dirty RF/modulation edits and decide what to bless.
-2. Add tests for `core/modulation.py` and `core/demodulation.py` if kept.
-3. Build a profile-to-bitstream adapter for TX that does not touch RF yet.
-4. Build a no-hardware BPSK symbol loopback using profile bits.
-5. Only then wire the profile engine into `TXFlowgraph`/`RXFlowgraph`.
+1. Run cabled B210 static QPSK on the same 60 dB loopback and document the
+   result in `WORK_DIARY.md`.
+2. Add truth-based payload diagnostics: expected payload comparison, payload
+   bit-error count, BER, payload match rate, and sequence-aware loss accounting.
+3. If QPSK is stable, add 8PSK runtime support using the same packed-chip
+   architecture, with frame-alignment validation for groups of 3 chips.
+4. Re-enable static baseband FHSS after static PSK modes have measurable link
+   quality.
+5. Continue wiring the pure profile engine toward the GNU Radio runtime without
+   moving frame grammar into GNU Radio blocks.

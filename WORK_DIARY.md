@@ -477,3 +477,20 @@ Passed.
 
 Manual GNU Radio construction check passed for BPSK simulation mode with
 nonzero `tx_warmup_frames`.
+
+### Hardware Result
+
+Rerunning the B210 loopback with `tx_warmup_frames: 60` showed the intended
+behavior:
+
+- RX acquired during the uncounted warmup period.
+- `TX feeder completed 60 warmup frames` appeared before official TX frame #0.
+- Official RX logging began immediately after official TX started.
+- Early official frames decoded with `FEC=OK` and the expected `00010203...`
+  payload.
+- SNR ramped from roughly 4-7 dB immediately after warmup to roughly 11-12 dB
+  within a few frames.
+
+This confirms warmup frames are better than transition-rich idle for startup
+conditioning because they exercise the same preamble, timing recovery, and
+despreading path as real traffic.

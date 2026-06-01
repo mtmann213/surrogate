@@ -415,3 +415,29 @@ Passed.
 
 Manual GNU Radio construction check passed for BPSK simulation mode with a
 nonzero TX start delay.
+
+## 2026-06-01 - Transition-Rich TX Idle
+
+### Observation
+
+With a 1 second TX feeder delay, TX frame numbering started cleaner, but RX
+still needed roughly 50 transmitted frames before first stable preamble
+detection. During the delay the TX source emitted constant zero chips, which
+provided RF power but little transition structure for timing recovery.
+
+### Changes
+
+- Changed `FrameChipSource` idle output from constant zero chips to a short
+  deterministic transition-rich chip pattern.
+- Kept the idle pattern below the current alternating-preamble correlation
+  threshold so it should not look like a valid preamble.
+- Added a regression test that checks the idle pattern is not preamble-like.
+
+### Verification
+
+```bash
+python3 -m unittest discover -v
+python3 -m compileall -q core radio gui logging_module main.py diagnose_link.py test_rx_power.py tests tools
+```
+
+Passed.

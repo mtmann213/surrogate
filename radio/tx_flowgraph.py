@@ -34,16 +34,31 @@ from radio.runtime_modulation import validate_runtime_modulation
 
 log = logging.getLogger(__name__)
 
+_IDLE_CHIP_PATTERN = np.array(
+    [1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0],
+    dtype=np.uint8,
+)
+
 
 class FrameChipSource(gr.sync_block):
     """Pulls chip arrays from a queue, outputs uint8 stream.
-    Outputs 0 (which maps to +1.0 in BPSK) when queue is empty."""
-    def __init__(self, chip_queue: queue.Queue):
+    Outputs a transition-rich idle pattern when queue is empty."""
+    def __init__(
+        self,
+        chip_queue: queue.Queue,
+        idle_pattern: Optional[np.ndarray] = None,
+    ):
         gr.sync_block.__init__(self, "Frame Chip Source",
                                in_sig=[], out_sig=[np.uint8])
         self._queue = chip_queue
         self._current: Optional[np.ndarray] = None
         self._offset = 0
+        self._idle_pattern = (
+            np.asarray(idle_pattern, dtype=np.uint8)
+            if idle_pattern is not None and len(idle_pattern) > 0
+            else np.array([0], dtype=np.uint8)
+        )
+        self._idle_offset = 0
 
     def work(self, input_items, output_items):
         out = output_items[0]
@@ -55,13 +70,24 @@ class FrameChipSource(gr.sync_block):
                     self._current = self._queue.get_nowait()
                     self._offset = 0
                 except queue.Empty:
-                    out[idx:] = 0
+                    self._fill_idle(out[idx:])
                     return n
             take = min(n - idx, len(self._current) - self._offset)
             out[idx:idx + take] = self._current[self._offset:self._offset + take]
             idx += take
             self._offset += take
         return n
+
+    def _fill_idle(self, out: np.ndarray) -> None:
+        idx = 0
+        pattern = self._idle_pattern
+        plen = len(pattern)
+        while idx < len(out):
+            pidx = self._idle_offset % plen
+            take = min(len(out) - idx, plen - pidx)
+            out[idx:idx + take] = pattern[pidx:pidx + take]
+            idx += take
+            self._idle_offset += take
 
 
 class TXFlowgraph(gr.top_block):
@@ -119,7 +145,7 @@ class TXFlowgraph(gr.top_block):
         # ---------- Modulation chain ----------
         validate_runtime_modulation(mod.type)
 
-        self._chip_src = FrameChipSource(self._chip_queue)
+        self._chip_src = FrameChipSource(self._chip_queue, _IDLE_CHIP_PATTERN)
         self._mod_type = mod.type
 
         self._bit_to_float = blocks.char_to_float(1, 1.0)

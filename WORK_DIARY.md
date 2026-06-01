@@ -384,3 +384,34 @@ to RF1 `RX2` through 60 dB attenuation.
 1. Run a longer static BPSK soak and record delivery/decode rates after startup.
 2. Reduce startup loss by delaying TX feeder start until RX is fully settled.
 3. Re-enable baseband hopping after static BPSK is stable.
+
+## 2026-06-01 - TX Startup Delay
+
+### Goal
+
+Reduce startup loss observed during the first successful B210 loopback, where
+TX frame numbers were ahead of RX while RX streaming, AGC, and timing recovery
+settled.
+
+### Changes
+
+- Added `timing.tx_start_delay_ms` to the runtime config.
+- Defaulted the working bench config to a 1000 ms TX feeder delay.
+- Started the TX GNU Radio top block before starting the Python frame feeder,
+  so early logged TX frames correspond to actual post-start feeder output.
+- Exposed the TX start delay in the Timing GUI panel.
+- Raised the Timing GUI guard-time range so applying timing settings does not
+  clamp the current 10 ms guard to 5 ms.
+- Added a config regression test to preserve `tx_start_delay_ms`.
+
+### Verification
+
+```bash
+python3 -m unittest discover -v
+python3 -m compileall -q core radio gui logging_module main.py diagnose_link.py test_rx_power.py tests tools
+```
+
+Passed.
+
+Manual GNU Radio construction check passed for BPSK simulation mode with a
+nonzero TX start delay.

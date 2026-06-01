@@ -300,6 +300,7 @@ class FlowgraphManager:
             self._fec_codec, self._anomaly_injector,
             self._on_tx_frame,
             baseband_hopper=hopper_tx,
+            start_delay_s=cfg.timing.tx_start_delay_ms / 1000.0,
         )
 
         self._rx_fg = RXFlowgraph(
@@ -376,4 +377,3 @@ class FlowgraphManager:
 
         # Dispatch via signals (for GUI/Qt thread)
         self.signals.frame_received.emit(payload, timestamp, snr, fec_ok)
-

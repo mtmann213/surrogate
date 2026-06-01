@@ -70,7 +70,8 @@ class TXFlowgraph(gr.top_block):
                  frame_gen: FrameGenerator, fec_codec: FECCodec,
                  anomaly_injector: AnomalyInjector,
                  frame_callback: Optional[Callable] = None,
-                 baseband_hopper: Optional[BasebandHopper] = None):
+                 baseband_hopper: Optional[BasebandHopper] = None,
+                 start_delay_s: float = 0.0):
         gr.top_block.__init__(self, "Surrogate TX")
 
         self._cfg = cfg
@@ -84,6 +85,7 @@ class TXFlowgraph(gr.top_block):
         self.frame_count = 0
         self._frame_callback = frame_callback
         self._baseband_hopper = baseband_hopper
+        self._start_delay_s = max(0.0, float(start_delay_s))
 
         rf = cfg.rf
         mod = cfg.modulation
@@ -205,11 +207,11 @@ class TXFlowgraph(gr.top_block):
 
     def start(self):
         self._running = True
+        super().start()
         self._feeder_thread = threading.Thread(
             target=self._frame_feeder, name="FrameFeeder", daemon=True
         )
         self._feeder_thread.start()
-        super().start()
 
     def stop(self):
         self._running = False
@@ -217,8 +219,16 @@ class TXFlowgraph(gr.top_block):
 
     def _frame_feeder(self):
         burst_s = self._cfg.timing.burst_duration_ms / 1000.0
-        mod = self._cfg.modulation
         frame_id = 0
+
+        if self._start_delay_s > 0:
+            log.info("TX feeder delaying %.3f s for RX startup settle", self._start_delay_s)
+            deadline = time.monotonic() + self._start_delay_s
+            while self._running and time.monotonic() < deadline:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.05, remaining))
 
         while self._running:
             if self._anomaly.should_drop_burst():

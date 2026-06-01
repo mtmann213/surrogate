@@ -44,7 +44,7 @@ class TimingPanel(QWidget):
         form = QFormLayout(grp)
 
         self.transition = QDoubleSpinBox()
-        self.transition.setRange(0.0, 5.0)
+        self.transition.setRange(0.0, 50.0)
         self.transition.setSingleStep(0.1)
         self.transition.setDecimals(2)
         self.transition.setSuffix(" ms")
@@ -55,6 +55,17 @@ class TimingPanel(QWidget):
             "Increase to 1–2 ms if you see tune misses in logs."
         )
         form.addRow("Transition / Guard:", self.transition)
+
+        self.tx_start_delay = QDoubleSpinBox()
+        self.tx_start_delay.setRange(0.0, 10000.0)
+        self.tx_start_delay.setSingleStep(100.0)
+        self.tx_start_delay.setDecimals(0)
+        self.tx_start_delay.setSuffix(" ms")
+        self.tx_start_delay.setToolTip(
+            "Delay before the TX feeder starts sending frames after flowgraph startup.\n"
+            "Lets RX streaming, AGC, and timing recovery settle before frame counting begins."
+        )
+        form.addRow("TX Start Delay:", self.tx_start_delay)
 
         self.preamble_dur = QDoubleSpinBox()
         self.preamble_dur.setRange(0.1, 5.0)
@@ -91,6 +102,7 @@ class TimingPanel(QWidget):
     def _load_config(self, cfg):
         t = cfg.timing
         self.transition.setValue(t.transition_time_ms)
+        self.tx_start_delay.setValue(t.tx_start_delay_ms)
         self.preamble_dur.setValue(t.preamble_duration_ms)
         self.jitter.setValue(t.timing_jitter_us)
         self._refresh_derived(cfg)
@@ -115,6 +127,7 @@ class TimingPanel(QWidget):
         self.config_changed.emit({
             "timing": {
                 "transition_time_ms": self.transition.value(),
+                "tx_start_delay_ms": self.tx_start_delay.value(),
                 "preamble_duration_ms": self.preamble_dur.value(),
                 "timing_jitter_us": self.jitter.value(),
             }

@@ -108,6 +108,7 @@ class TimingConfig(BaseModel):
     preamble_duration_ms: float = 1.0
     transition_time_ms: float = 0.5
     timing_jitter_us: float = 0.0
+    tx_start_delay_ms: float = 1000.0
 
 
 class HoppingConfig(BaseModel):

@@ -29,6 +29,7 @@ timing:
   preamble_duration_ms: 2.56
   transition_time_ms: 10.0
   timing_jitter_us: 0.0
+  tx_start_delay_ms: 1000.0
 modulation:
   type: bpsk
   bit_rate_bps: 12500.0

@@ -494,3 +494,44 @@ behavior:
 This confirms warmup frames are better than transition-rich idle for startup
 conditioning because they exercise the same preamble, timing recovery, and
 despreading path as real traffic.
+
+## 2026-06-01 - Runtime QPSK Path
+
+### Goal
+
+Add the first higher-order live PSK mode after static BPSK loopback proved
+stable.
+
+### Changes
+
+- Enabled `qpsk` in runtime modulation guardrails while keeping 8PSK/DPSK
+  blocked.
+- Added packed-chip frame alignment validation so QPSK requires the full
+  spread frame chip count to be divisible by 2.
+- Added TX QPSK path:
+  `chip bits -> pack 2 bits -> GNU Radio QPSK symbols -> RRC at symbol_rate`.
+- Added RX QPSK path:
+  `Costas order 4 -> QPSK constellation decoder -> unpack 2 bits -> chip stream
+  -> existing FrameSink`.
+- Kept `FrameSink` chip-oriented; it still owns preamble detection, phase
+  correction, despreading, FEC parse, and callback dispatch.
+- Exposed `qpsk` in the modulation GUI selector.
+- Added runtime guard tests for supported modes, QPSK bits-per-symbol, and
+  QPSK frame alignment.
+
+### Verification
+
+```bash
+python3 -m unittest discover -v
+python3 -m compileall -q core radio gui logging_module main.py diagnose_link.py test_rx_power.py tests tools
+```
+
+Passed.
+
+Manual GNU Radio construction checks passed for BPSK and QPSK simulation-mode
+TX/RX flowgraphs.
+
+### Next RF Step
+
+Run cabled B210 static QPSK with the existing 60 dB attenuation and warmup
+frames before attempting 8PSK or hopping.

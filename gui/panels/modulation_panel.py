@@ -25,9 +25,10 @@ class ModulationPanel(QWidget):
         mod_form = QFormLayout(mod_grp)
 
         self.mod_type = QComboBox()
-        self.mod_type.addItems(["bpsk"])
+        self.mod_type.addItems(["bpsk", "qpsk"])
         self.mod_type.setToolTip(
-            "BPSK: Binary Phase Shift Keying. 1 bit/symbol. Current hardware runtime mode.\n\n"
+            "BPSK: Binary Phase Shift Keying. 1 chip/symbol. Most robust.\n"
+            "QPSK: Quadrature PSK. 2 chips/symbol. Higher throughput, needs cleaner phase/timing.\n\n"
             "DSSS Theory: Bits are XORed with the spreading sequence.\n"
             "Bit '0' = Chips transmitted as-is.\n"
             "Bit '1' = Chips are inverted (180° phase flip)."

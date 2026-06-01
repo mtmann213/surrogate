@@ -26,7 +26,11 @@ from core.spreading_codes import get_code
 from radio.blocks.frame_sink import FrameSink
 from radio.blocks.hop_controller import HopController
 from radio.blocks.baseband_hopper import BasebandHopper
-from radio.runtime_modulation import validate_runtime_modulation
+from radio.runtime_modulation import (
+    runtime_bits_per_symbol,
+    validate_runtime_frame_alignment,
+    validate_runtime_modulation,
+)
 
 log = logging.getLogger(__name__)
 
@@ -52,10 +56,12 @@ class RXFlowgraph(gr.top_block):
         frame   = cfg.frame
 
         validate_runtime_modulation(mod.type)
+        self._bits_per_symbol = runtime_bits_per_symbol(mod.type)
 
         sample_rate = rf.sample_rate
         chip_rate   = mod.chip_rate_sps
-        sps         = sample_rate / chip_rate
+        symbol_rate = chip_rate / self._bits_per_symbol
+        sps         = sample_rate / symbol_rate
         self._sps   = sps
         self._mod_type = mod.type
         burst_s     = timing.burst_duration_ms / 1000.0
@@ -71,6 +77,8 @@ class RXFlowgraph(gr.top_block):
             coded_bits   = fec_codec.coded_length(aligned_bits)
         else:
             coded_bits = data_info_bits
+        total_chips = frame.preamble.length_bits + coded_bits * code_len
+        validate_runtime_frame_alignment(mod.type, total_chips)
 
         # ---- UHD Source / Simulation Source ----
         if cfg.rf.simulation:
@@ -105,17 +113,32 @@ class RXFlowgraph(gr.top_block):
         ps     = mod.pulse_shaping
         n_taps = ps.span_symbols * int(sps) + 1
         rrc_taps = gr_filter.firdes.root_raised_cosine(
-            1.0, sample_rate, chip_rate, ps.rolloff, n_taps
+            1.0, sample_rate, symbol_rate, ps.rolloff, n_taps
         )
         self._rrc_mf = gr_filter.fir_filter_ccf(1, rrc_taps)
 
-        # ---- M&M Timing Recovery (chip-rate complex output) ----
+        # ---- M&M Timing Recovery (symbol-rate complex output) ----
         self._timing_recovery = digital.clock_recovery_mm_cc(
             float(sps), 0.25 * 0.175 ** 2, 0.5, 0.175, 0.005,
         )
 
-        # ---- Costas Loop (BPSK carrier phase recovery) ----
-        self._costas = digital.costas_loop_cc(2 * np.pi / 500.0, 2)
+        # ---- Costas Loop carrier phase recovery ----
+        self._costas = digital.costas_loop_cc(
+            2 * np.pi / 500.0,
+            4 if self._mod_type == "qpsk" else 2,
+        )
+
+        if self._mod_type == "qpsk":
+            self._qpsk_constellation = digital.constellation_qpsk()
+            self._constellation_decoder = digital.constellation_decoder_cb(
+                self._qpsk_constellation.base()
+            )
+            self._unpack = blocks.unpack_k_bits_bb(2)
+            self._chip_to_float = blocks.char_to_float(1, 1.0)
+            self._chip_scale = blocks.multiply_const_ff(-2.0)
+            self._chip_offset = blocks.add_const_ff(1.0)
+            self._float_to_complex = blocks.float_to_complex()
+            self._null_src = blocks.null_source(gr.sizeof_float)
 
         # ---- Frame Sink (complex64 input, preamble detect + despread + callback) ----
         preamble_bits = frame_gen.preamble_bits
@@ -161,7 +184,17 @@ class RXFlowgraph(gr.top_block):
         self.connect(last, self._rrc_mf)
         self.connect(self._rrc_mf, self._timing_recovery)
         self.connect(self._timing_recovery, self._costas)
-        self.connect(self._costas, self._frame_sink)
+        if self._mod_type == "qpsk":
+            self.connect(self._costas, self._constellation_decoder)
+            self.connect(self._constellation_decoder, self._unpack)
+            self.connect(self._unpack, self._chip_to_float)
+            self.connect(self._chip_to_float, self._chip_scale)
+            self.connect(self._chip_scale, self._chip_offset)
+            self.connect(self._chip_offset, (self._float_to_complex, 0))
+            self.connect(self._null_src, (self._float_to_complex, 1))
+            self.connect(self._float_to_complex, self._frame_sink)
+        else:
+            self.connect(self._costas, self._frame_sink)
 
     def _on_frame_received(self, coded_bits: np.ndarray,
                            timestamp: float, snr: float) -> None:

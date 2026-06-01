@@ -2,21 +2,31 @@ import unittest
 
 from radio.runtime_modulation import (
     SUPPORTED_RUNTIME_MODULATIONS,
+    runtime_bits_per_symbol,
+    validate_runtime_frame_alignment,
     validate_runtime_modulation,
 )
 from radio.tx_flowgraph import _IDLE_CHIP_PATTERN
 
 
 class RuntimeModulationTests(unittest.TestCase):
-    def test_bpsk_is_current_runtime_mode(self):
-        self.assertEqual(SUPPORTED_RUNTIME_MODULATIONS, {"bpsk"})
+    def test_bpsk_and_qpsk_are_current_runtime_modes(self):
+        self.assertEqual(SUPPORTED_RUNTIME_MODULATIONS, {"bpsk", "qpsk"})
         validate_runtime_modulation("bpsk")
+        validate_runtime_modulation("qpsk")
+        self.assertEqual(runtime_bits_per_symbol("bpsk"), 1)
+        self.assertEqual(runtime_bits_per_symbol("qpsk"), 2)
 
     def test_unwired_runtime_modulations_fail_loudly(self):
-        for modulation_type in ("qpsk", "8psk", "8dpsk", "d8psk"):
+        for modulation_type in ("8psk", "8dpsk", "d8psk"):
             with self.subTest(modulation_type=modulation_type):
                 with self.assertRaisesRegex(ValueError, "Runtime flowgraph"):
                     validate_runtime_modulation(modulation_type)
+
+    def test_qpsk_requires_even_total_frame_chips(self):
+        validate_runtime_frame_alignment("qpsk", 17268)
+        with self.assertRaisesRegex(ValueError, "divisible by 2"):
+            validate_runtime_frame_alignment("qpsk", 17269)
 
     def test_idle_chip_pattern_is_not_preamble_like(self):
         preamble = [0, 1] * 16

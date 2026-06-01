@@ -3,7 +3,7 @@ TX Flowgraph — simplified static path.
 
 Signal chain (static, no hopping):
   FrameSource (Python thread → queue) → FEC+DSSS (pre-processing)
-  → FrameChipSource → BPSK Modulator → RRC Filter
+  → FrameChipSource → Modulator → RRC Filter
   → [BasebandHopper] → UHD Sink
 
 No heartbeat, no BurstGate, no adder, no HopController.
@@ -18,7 +18,7 @@ import logging
 import numpy as np
 from typing import Callable, Optional
 
-from gnuradio import gr, blocks, filter as gr_filter, analog, zeromq
+from gnuradio import gr, blocks, filter as gr_filter, analog, digital, zeromq
 from gnuradio import uhd as gr_uhd
 import pmt
 
@@ -30,7 +30,11 @@ from core.spreading_codes import get_code
 from core.anomaly_injector import AnomalyInjector
 from radio.blocks.anomaly_block import AnomalyBlock
 from radio.blocks.baseband_hopper import BasebandHopper
-from radio.runtime_modulation import validate_runtime_modulation
+from radio.runtime_modulation import (
+    runtime_bits_per_symbol,
+    validate_runtime_frame_alignment,
+    validate_runtime_modulation,
+)
 
 log = logging.getLogger(__name__)
 
@@ -146,22 +150,34 @@ class TXFlowgraph(gr.top_block):
 
         # ---------- Modulation chain ----------
         validate_runtime_modulation(mod.type)
+        self._bits_per_symbol = runtime_bits_per_symbol(mod.type)
+        self._total_frame_chips = self._frame_total_chips()
+        validate_runtime_frame_alignment(mod.type, self._total_frame_chips)
 
         self._chip_src = FrameChipSource(self._chip_queue, _IDLE_CHIP_PATTERN)
         self._mod_type = mod.type
 
-        self._bit_to_float = blocks.char_to_float(1, 1.0)
-        self._scale = blocks.multiply_const_ff(-2.0)
-        self._offset_add = blocks.add_const_ff(1.0)
-        self._float_to_complex = blocks.float_to_complex()
-        self._null_src = blocks.null_source(gr.sizeof_float)
+        if self._mod_type == "qpsk":
+            self._pack = blocks.pack_k_bits_bb(2)
+            self._qpsk_constellation = digital.constellation_qpsk()
+            self._chunks_to_sym = digital.chunks_to_symbols_bc(
+                self._qpsk_constellation.points(),
+                1,
+            )
+        else:
+            self._bit_to_float = blocks.char_to_float(1, 1.0)
+            self._scale = blocks.multiply_const_ff(-2.0)
+            self._offset_add = blocks.add_const_ff(1.0)
+            self._float_to_complex = blocks.float_to_complex()
+            self._null_src = blocks.null_source(gr.sizeof_float)
 
-        # RRC pulse shaping filter at chip_rate for the current BPSK chip stream.
-        sps = rf.sample_rate / mod.chip_rate_sps
+        # RRC pulse shaping filter at symbol_rate for packed chip symbols.
+        symbol_rate = mod.chip_rate_sps / self._bits_per_symbol
+        sps = rf.sample_rate / symbol_rate
         ps = mod.pulse_shaping
         n_taps = ps.span_symbols * int(sps) + 1
         rrc_taps = gr_filter.firdes.root_raised_cosine(
-            1.0, rf.sample_rate, mod.chip_rate_sps, ps.rolloff, n_taps
+            1.0, rf.sample_rate, symbol_rate, ps.rolloff, n_taps
         )
         self._rrc_filter = gr_filter.interp_fir_filter_ccf(int(sps), rrc_taps)
 
@@ -177,13 +193,19 @@ class TXFlowgraph(gr.top_block):
         self._connect()
 
     def _connect(self):
-        # Chips -> BPSK -> RRC
-        self.connect(self._chip_src, self._bit_to_float)
-        self.connect(self._bit_to_float, self._scale)
-        self.connect(self._scale, self._offset_add)
-        self.connect(self._offset_add, (self._float_to_complex, 0))
-        self.connect(self._null_src, (self._float_to_complex, 1))
-        self.connect(self._float_to_complex, self._rrc_filter)
+        if self._mod_type == "qpsk":
+            # Chips -> pack pairs -> QPSK symbols -> RRC
+            self.connect(self._chip_src, self._pack)
+            self.connect(self._pack, self._chunks_to_sym)
+            self.connect(self._chunks_to_sym, self._rrc_filter)
+        else:
+            # Chips -> BPSK -> RRC
+            self.connect(self._chip_src, self._bit_to_float)
+            self.connect(self._bit_to_float, self._scale)
+            self.connect(self._scale, self._offset_add)
+            self.connect(self._offset_add, (self._float_to_complex, 0))
+            self.connect(self._null_src, (self._float_to_complex, 1))
+            self.connect(self._float_to_complex, self._rrc_filter)
         last = self._rrc_filter
 
         # Anomaly (if enabled)
@@ -327,3 +349,19 @@ class TXFlowgraph(gr.top_block):
         data_chips = (data_bits.reshape(-1, 1) ^ ref_code).reshape(-1).astype(np.uint8)
 
         return np.concatenate([preamble_chips, data_chips]).astype(np.uint8)
+
+    def _frame_total_chips(self) -> int:
+        data_info_bits = (
+            self._cfg.frame.payload_bits
+            + (
+                self._cfg.frame.invariant.length_bits
+                if self._cfg.frame.invariant.enabled
+                else 0
+            )
+        )
+        if self._fec_codec.enabled:
+            aligned_bits = ((data_info_bits + 7) // 8) * 8
+            coded_bits = self._fec_codec.coded_length(aligned_bits)
+        else:
+            coded_bits = data_info_bits
+        return self._cfg.frame.preamble.length_bits + coded_bits * self._code_len

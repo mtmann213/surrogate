@@ -1,7 +1,7 @@
 """Burst Timing Configuration Panel."""
 from __future__ import annotations
 from PyQt5.QtWidgets import (
-    QWidget, QFormLayout, QDoubleSpinBox, QGroupBox,
+    QWidget, QFormLayout, QDoubleSpinBox, QGroupBox, QSpinBox,
     QVBoxLayout, QPushButton, QLabel, QFrame
 )
 from PyQt5.QtCore import pyqtSignal, Qt
@@ -67,6 +67,15 @@ class TimingPanel(QWidget):
         )
         form.addRow("TX Start Delay:", self.tx_start_delay)
 
+        self.tx_warmup_frames = QSpinBox()
+        self.tx_warmup_frames.setRange(0, 1000)
+        self.tx_warmup_frames.setSingleStep(10)
+        self.tx_warmup_frames.setToolTip(
+            "Uncounted training frames sent before official TX frame #0.\n"
+            "Use this to let RX AGC and timing recovery acquire before stats begin."
+        )
+        form.addRow("TX Warmup Frames:", self.tx_warmup_frames)
+
         self.preamble_dur = QDoubleSpinBox()
         self.preamble_dur.setRange(0.1, 5.0)
         self.preamble_dur.setSingleStep(0.1)
@@ -103,6 +112,7 @@ class TimingPanel(QWidget):
         t = cfg.timing
         self.transition.setValue(t.transition_time_ms)
         self.tx_start_delay.setValue(t.tx_start_delay_ms)
+        self.tx_warmup_frames.setValue(t.tx_warmup_frames)
         self.preamble_dur.setValue(t.preamble_duration_ms)
         self.jitter.setValue(t.timing_jitter_us)
         self._refresh_derived(cfg)
@@ -128,6 +138,7 @@ class TimingPanel(QWidget):
             "timing": {
                 "transition_time_ms": self.transition.value(),
                 "tx_start_delay_ms": self.tx_start_delay.value(),
+                "tx_warmup_frames": self.tx_warmup_frames.value(),
                 "preamble_duration_ms": self.preamble_dur.value(),
                 "timing_jitter_us": self.jitter.value(),
             }

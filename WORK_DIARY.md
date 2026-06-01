@@ -441,3 +441,39 @@ python3 -m compileall -q core radio gui logging_module main.py diagnose_link.py 
 ```
 
 Passed.
+
+## 2026-06-01 - Uncounted TX Warmup Frames
+
+### Observation
+
+The transition-rich idle pattern did not materially improve acquisition.
+First good preamble still arrived around official TX frame 50-60. This showed
+RX wanted complete framed bursts for AGC/timing/correlation acquisition, not
+just transition-rich idle chips.
+
+### Changes
+
+- Added `timing.tx_warmup_frames`, defaulting to 60 for the current bench.
+- TX feeder sends warmup frames before official frame #0.
+- Warmup frames are queued and paced like normal frames but are not logged as
+  official TX frames and do not increment `TXFlowgraph.frame_count`.
+- FlowgraphManager ignores RX callbacks until the first official TX frame has
+  been queued/logged, so warmup decodes do not pollute delivery stats.
+- Fixed the TX feeder pacing so official frames sleep for the configured burst
+  interval after each queued frame.
+- Ensured each official frame uses the same payload bytes for chip generation
+  and TX logging.
+- Exposed warmup frames in the Timing GUI panel.
+- Extended config tests to preserve both startup delay and warmup frame count.
+
+### Verification
+
+```bash
+python3 -m unittest discover -v
+python3 -m compileall -q core radio gui logging_module main.py diagnose_link.py test_rx_power.py tests tools
+```
+
+Passed.
+
+Manual GNU Radio construction check passed for BPSK simulation mode with
+nonzero `tx_warmup_frames`.

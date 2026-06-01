@@ -97,7 +97,8 @@ class TXFlowgraph(gr.top_block):
                  anomaly_injector: AnomalyInjector,
                  frame_callback: Optional[Callable] = None,
                  baseband_hopper: Optional[BasebandHopper] = None,
-                 start_delay_s: float = 0.0):
+                 start_delay_s: float = 0.0,
+                 warmup_frames: int = 0):
         gr.top_block.__init__(self, "Surrogate TX")
 
         self._cfg = cfg
@@ -112,6 +113,7 @@ class TXFlowgraph(gr.top_block):
         self._frame_callback = frame_callback
         self._baseband_hopper = baseband_hopper
         self._start_delay_s = max(0.0, float(start_delay_s))
+        self._warmup_frames = max(0, int(warmup_frames))
 
         rf = cfg.rf
         mod = cfg.modulation
@@ -256,45 +258,72 @@ class TXFlowgraph(gr.top_block):
                     break
                 time.sleep(min(0.05, remaining))
 
+        for warmup_idx in range(self._warmup_frames):
+            if not self._running:
+                return
+            if self._anomaly.should_drop_burst():
+                time.sleep(burst_s)
+                continue
+
+            payload = self._payload_bytes()
+            try:
+                self._chip_queue.put(
+                    self._build_frame_chips(payload, warmup_idx),
+                    timeout=burst_s * 4,
+                )
+            except queue.Full:
+                log.warning("TX chip queue full -- dropping warmup frame")
+            time.sleep(burst_s)
+
+        if self._warmup_frames > 0 and self._running:
+            log.info("TX feeder completed %d warmup frames", self._warmup_frames)
+
         while self._running:
             if self._anomaly.should_drop_burst():
                 time.sleep(burst_s)
                 continue
 
-            if self._cfg.frame.payload_hex:
-                try:
-                    payload = bytes.fromhex(self._cfg.frame.payload_hex)
-                except ValueError:
-                    payload = bytes(range(256)) * 4
-            else:
-                payload = bytes(range(256)) * 4
+            payload = self._payload_bytes()
+            all_chips = self._build_frame_chips(payload, frame_id)
 
-            payload_bits = np.unpackbits(np.frombuffer(payload, dtype=np.uint8))
-            payload_bits = self._anomaly.apply_ber(payload_bits)
-            payload = np.packbits(payload_bits).tobytes()
-
-            frame_bits = self._frame_gen.build_frame(payload, frame_id)
-
-            pre_len = self._cfg.frame.preamble.length_bits
-            preamble_chips = frame_bits[:pre_len]
-            data_bits = frame_bits[pre_len:]
-
-            cl = self._code_len
-            ref_code = self._spread_code[:cl].reshape(1, cl)
-            data_chips = (data_bits.reshape(-1, 1) ^ ref_code).reshape(-1).astype(np.uint8)
-
-            all_chips = np.concatenate([preamble_chips, data_chips]).astype(np.uint8)
+            try:
+                self._chip_queue.put(all_chips, timeout=burst_s * 4)
+            except queue.Full:
+                log.warning("TX chip queue full -- dropping frame")
+                time.sleep(burst_s)
+                continue
 
             if self._frame_callback:
                 try:
                     self._frame_callback(frame_id, payload, time.time())
                 except Exception:
                     pass
-
             frame_id += 1
             self.frame_count += 1
+            time.sleep(burst_s)
 
+    def _payload_bytes(self) -> bytes:
+        if self._cfg.frame.payload_hex:
             try:
-                self._chip_queue.put(all_chips, timeout=burst_s * 4)
-            except queue.Full:
-                log.warning("TX chip queue full -- dropping frame")
+                payload = bytes.fromhex(self._cfg.frame.payload_hex)
+            except ValueError:
+                payload = bytes(range(256)) * 4
+        else:
+            payload = bytes(range(256)) * 4
+
+        payload_bits = np.unpackbits(np.frombuffer(payload, dtype=np.uint8))
+        payload_bits = self._anomaly.apply_ber(payload_bits)
+        return np.packbits(payload_bits).tobytes()
+
+    def _build_frame_chips(self, payload: bytes, frame_id: int) -> np.ndarray:
+        frame_bits = self._frame_gen.build_frame(payload, frame_id)
+
+        pre_len = self._cfg.frame.preamble.length_bits
+        preamble_chips = frame_bits[:pre_len]
+        data_bits = frame_bits[pre_len:]
+
+        cl = self._code_len
+        ref_code = self._spread_code[:cl].reshape(1, cl)
+        data_chips = (data_bits.reshape(-1, 1) ^ ref_code).reshape(-1).astype(np.uint8)
+
+        return np.concatenate([preamble_chips, data_chips]).astype(np.uint8)

@@ -116,6 +116,7 @@ class FlowgraphManager:
 
         # Stats
         self._stats = LinkStats()
+        self._official_tx_started = False
         self._tx_tracker = _RateTracker()
         self._rx_tracker = _RateTracker()
         self._events: Deque[str] = deque(maxlen=_MAX_EVENTS)
@@ -130,6 +131,7 @@ class FlowgraphManager:
         with self._lock:
             if self._running:
                 return
+            self._official_tx_started = False
             self._build_core_objects(self._cm.config)
             self._build_flowgraphs()
             self._running = True
@@ -184,6 +186,7 @@ class FlowgraphManager:
         with self._lock:
             self._stop_flowgraphs()
             self._stats = LinkStats()
+            self._official_tx_started = False
             self._build_core_objects(self._cm.config)
             self._build_flowgraphs()
 
@@ -301,6 +304,7 @@ class FlowgraphManager:
             self._on_tx_frame,
             baseband_hopper=hopper_tx,
             start_delay_s=cfg.timing.tx_start_delay_ms / 1000.0,
+            warmup_frames=cfg.timing.tx_warmup_frames,
         )
 
         self._rx_fg = RXFlowgraph(
@@ -336,6 +340,7 @@ class FlowgraphManager:
             self._rx_fg.set_rx_gain(cfg.rf.rx_gain)
 
     def _on_tx_frame(self, frame_id: int, payload: bytes, timestamp: float) -> None:
+        self._official_tx_started = True
         self._tx_tracker.record()
         idx = self._hop_scheduler.current_index()
         hop_freq = self._hop_scheduler.frequency_at(idx)
@@ -350,6 +355,9 @@ class FlowgraphManager:
 
     def _dispatch_frame(self, payload: bytes, timestamp: float,
                         snr: float, fec_ok: bool) -> None:
+        if not self._official_tx_started:
+            return
+
         # Update SNR history (keep last 30) for the graph regardless of FEC
         self._stats.snr_history.append(snr)
         if len(self._stats.snr_history) > 30:

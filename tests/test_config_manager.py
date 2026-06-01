@@ -62,12 +62,18 @@ class ConfigManagerDerivationTests(unittest.TestCase):
             6.0,
         )
 
-    def test_tx_start_delay_is_preserved(self):
+    def test_tx_startup_timing_is_preserved(self):
         cfg = SurrogateConfig.model_validate(
-            _base_config(timing={"tx_start_delay_ms": 1500.0})
+            _base_config(
+                timing={
+                    "tx_start_delay_ms": 1500.0,
+                    "tx_warmup_frames": 42,
+                }
+            )
         )
 
         self.assertEqual(cfg.timing.tx_start_delay_ms, 1500.0)
+        self.assertEqual(cfg.timing.tx_warmup_frames, 42)
 
 
 if __name__ == "__main__":

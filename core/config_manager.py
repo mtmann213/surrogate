@@ -109,6 +109,7 @@ class TimingConfig(BaseModel):
     transition_time_ms: float = 0.5
     timing_jitter_us: float = 0.0
     tx_start_delay_ms: float = 1000.0
+    tx_warmup_frames: int = 60
 
 
 class HoppingConfig(BaseModel):

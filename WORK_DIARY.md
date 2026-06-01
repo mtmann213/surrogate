@@ -219,6 +219,41 @@ Initial read suggests these are not junk. They appear to contain forward work:
 - baseband hopper sample-counter simplification
 - status metrics and flowgraph rebuild improvements
 
+## 2026-06-01 - Modulation Helper Checkpoint
+
+### Goal
+
+Split the pure modulation/demodulation helpers out from the larger dirty RF
+thread and put tests around them before reviewing flowgraph behavior.
+
+### Changes
+
+Added tests for:
+
+- BPSK, QPSK, and 8PSK symbol roundtrips
+- DBPSK, DQPSK, and D8PSK helper roundtrips
+- differential encode/decode roundtrip
+- FSK roundtrip and output length
+- empty input behavior
+- registry consistency between modulation and demodulation helpers
+- invalid QPSK/8PSK bit counts
+
+### Notes
+
+The differential PSK helpers currently use bit-level differential coding around
+the existing PSK mappers. That is acceptable as a tested helper checkpoint, but
+the OTA waveform phase-differential behavior should be reviewed before treating
+it as final modem semantics.
+
+### Verification
+
+```bash
+python3 -m unittest discover -v
+python3 -m compileall -q core radio gui logging_module main.py diagnose_link.py test_rx_power.py tests tools
+```
+
+Passed.
+
 Recommendation:
 
 1. Do not revert casually.

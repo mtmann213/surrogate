@@ -2,12 +2,15 @@
 Frame Sink -- GNU Radio block.
 
 Performs the complete RX frame pipeline in one block:
-  1. Preamble detection via sliding bipolar correlation (unspread symbols)
+  1. Preamble detection via sliding bipolar correlation (complex magnitude)
   2. Chip collection for one full frame after the preamble
-  3. Despreading (vectorised, one soft bit per code_length chips)
-  4. Hard-decision and callback dispatch
+  3. Phase estimation from preamble peak (handles Costas not-yet-locked)
+  4. Despreading on phase-corrected real component
+  5. Hard-decision and callback dispatch
 
-Input:  float32 soft BPSK symbols (one per chip, after complex_to_real)
+Input:  complex64 (I/Q samples after timing recovery, before Costas lock)
+        Phase offset is estimated from the preamble peak and corrected
+        at despread time — no Costas convergence wait required.
 Output: none (sink)
 """
 from __future__ import annotations
@@ -25,7 +28,7 @@ import pmt
 
 log = logging.getLogger(__name__)
 
-_EMPTY = np.empty(0, dtype=np.float32)
+_EMPTY = np.empty(0, dtype=np.complex64)
 
 
 class FrameSink(gr.sync_block):
@@ -38,7 +41,7 @@ class FrameSink(gr.sync_block):
                  callback: Optional[Callable] = None,
                  diag_dir: Optional[str] = None):
         gr.sync_block.__init__(self, "Frame Sink",
-                               in_sig=[np.float32], out_sig=[])
+                               in_sig=[np.complex64], out_sig=[])
 
         self.message_port_register_out(pmt.intern("preamble_detected"))
         self.message_port_register_out(pmt.intern("frame_complete"))
@@ -54,9 +57,9 @@ class FrameSink(gr.sync_block):
         self._buf: np.ndarray = _EMPTY.copy()
         self._new_samples = 0
         self._state = "SEARCHING"
-        self._collect_buf = np.empty(self._data_chips, dtype=np.float32)
+        self._collect_buf = np.empty(self._data_chips, dtype=np.complex64)
         self._collect_idx = 0
-        self._polarity = 1.0
+        self._phase_correction = 1.0 + 0.0j
 
         self.frames_received = 0
         self.last_snr = 0.0
@@ -103,7 +106,6 @@ class FrameSink(gr.sync_block):
         if n < pl:
             return
 
-        # Direct correlation with bipolar preamble reference.
         ref = self._preamble
         corr = np.correlate(buf, ref, mode='valid')
         peak_idx = int(np.argmax(np.abs(corr)))
@@ -112,11 +114,9 @@ class FrameSink(gr.sync_block):
         self.last_peak = peak_val
         self._search_count += 1
 
-        chip_region = buf[peak_idx:peak_idx + pl]
-        chip_mean = float(np.mean(chip_region))
-        chip_std = float(np.std(chip_region))
-        chip_abs_mean = float(np.mean(np.abs(chip_region)))
-        chip_corr = float(np.sum(chip_region * ref))
+        chip_region = np.abs(buf[peak_idx:peak_idx + pl])
+        chip_abs_mean = float(np.mean(chip_region))
+        chip_corr = float(np.abs(np.sum(buf[peak_idx:peak_idx + pl] * ref)))
 
         now = time.time()
         if now - self._last_debug_t >= 2.0:
@@ -126,9 +126,9 @@ class FrameSink(gr.sync_block):
             log.info(
                 "[RX-DIAG] corr peak=%.2f  threshold=%.2f  mean_amp=%.3f  "
                 "max_peak=%.2f  est_sig_amp=%.3f  buf_chips=%d  searches=%d "
-                "chip_mean=%.3f  chip_std=%.3f  chip_abs=%.3f  raw_corr=%.2f",
+                "chip_abs=%.3f  raw_corr=%.2f",
                 peak_val, threshold, mean_amp, max_peak, est_signal_amp,
-                n, self._search_count, chip_mean, chip_std, chip_abs_mean, chip_corr,
+                n, self._search_count, chip_abs_mean, chip_corr,
             )
             self._last_debug_t = now
             self._search_count = 0
@@ -147,7 +147,7 @@ class FrameSink(gr.sync_block):
                     "[RX-NEAR-MISS] peak=%.2f  thresh=%.2f  ratio=%.1f%%  "
                     "chip_abs=%.3f  peak_region=%s",
                     peak_val, threshold, 100 * peak_val / threshold, chip_abs_mean,
-                    ' '.join(f'{x:+.2f}' for x in peak_region[:min(36, len(peak_region))]),
+                    ' '.join(f'{x.real:+.2f},{x.imag:+.1f}' for x in peak_region[:min(18, len(peak_region))]),
                 )
                 if self._diag_dir and self._diag_save_idx < 3:
                     save_path = os.path.join(
@@ -159,23 +159,26 @@ class FrameSink(gr.sync_block):
         if peak_val >= threshold:
             exclude_start = max(0, peak_idx - pl)
             exclude_end = min(len(corr), peak_idx + pl)
-            noise_samples = np.concatenate([corr[:exclude_start], corr[exclude_end:]])
-            noise_floor = float(np.std(np.abs(noise_samples))) + 1e-9
+            noise_samples = np.concatenate([np.abs(corr[:exclude_start]),
+                                            np.abs(corr[exclude_end:])])
+            noise_floor = float(np.std(noise_samples)) + 1e-9
             snr_val = 20.0 * np.log10(peak_val / (noise_floor * np.sqrt(pl)))
 
             self.last_snr = snr_val
-            self._polarity = float(np.sign(corr[peak_idx]))
+            peak_complex = corr[peak_idx]
+            self._phase_correction = np.conj(peak_complex) / (abs(peak_complex) + 1e-30)
 
             log.info(
-                "[RX-PREAMBLE] peak=%.2f  threshold=%.2f  polarity=%+.0f  "
-                "snr=%.1f dB  frames_rx=%d",
-                peak_val, threshold, self._polarity,
+                "[RX-PREAMBLE] peak=%.2f  threshold=%.2f  "
+                "phase_corr=%.1f deg  snr=%.1f dB  frames_rx=%d",
+                peak_val, threshold,
+                np.angle(peak_complex, deg=True),
                 self.last_snr, self.frames_received,
             )
 
             pmsg = pmt.make_dict()
-            pmsg = pmt.dict_add(pmsg, pmt.intern("polarity"),
-                                pmt.from_double(self._polarity))
+            pmsg = pmt.dict_add(pmsg, pmt.intern("phase"),
+                                pmt.from_double(np.angle(peak_complex)))
             pmsg = pmt.dict_add(pmsg, pmt.intern("snr"),
                                 pmt.from_double(self.last_snr))
             self.message_port_pub(pmt.intern("preamble_detected"), pmsg)
@@ -244,4 +247,5 @@ class FrameSink(gr.sync_block):
         cl = self._code_len
         n_bits = len(chips) // cl
         matrix = chips[:n_bits * cl].reshape(n_bits, cl)
-        return (matrix @ self._code) * self._polarity
+        phase_aligned = self._phase_correction * matrix
+        return np.real(phase_aligned @ self._code)

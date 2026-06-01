@@ -1,19 +1,19 @@
 rf:
   hw_mode: single_b210
   simulation: false
-  gnd_device: serial=34D628A
-  msl_device: serial=34D628A
+  gnd_device: serial=34D6458
+  msl_device: serial=34D6458
   b210_ref_source: internal
   center_frequency: 915000000.0
-  sample_rate: 500000.0
-  tx_gain: 50.0
-  rx_gain: 50.0
+  sample_rate: 1000000.0
+  tx_gain: 35.0
+  rx_gain: 35.0
   tx_channel: 0
   rx_channel: 1
   tx_antenna: TX/RX
   rx_antenna: RX2
-  tx_bandwidth: 500000.0
-  rx_bandwidth: 500000.0
+  tx_bandwidth: 1000000.0
+  rx_bandwidth: 1000000.0
 hopping:
   enabled: false
   hop_type: custom

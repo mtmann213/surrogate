@@ -3,7 +3,7 @@ TX Flowgraph — simplified static path.
 
 Signal chain (static, no hopping):
   FrameSource (Python thread → queue) → FEC+DSSS (pre-processing)
-  → FrameChipSource → BPSK/QPSK Modulator → RRC Filter
+  → FrameChipSource → BPSK Modulator → RRC Filter
   → [BasebandHopper] → UHD Sink
 
 No heartbeat, no BurstGate, no adder, no HopController.
@@ -18,7 +18,7 @@ import logging
 import numpy as np
 from typing import Callable, Optional
 
-from gnuradio import gr, blocks, filter as gr_filter, analog, digital, zeromq
+from gnuradio import gr, blocks, filter as gr_filter, analog, zeromq
 from gnuradio import uhd as gr_uhd
 import pmt
 
@@ -30,6 +30,7 @@ from core.spreading_codes import get_code
 from core.anomaly_injector import AnomalyInjector
 from radio.blocks.anomaly_block import AnomalyBlock
 from radio.blocks.baseband_hopper import BasebandHopper
+from radio.runtime_modulation import validate_runtime_modulation
 
 log = logging.getLogger(__name__)
 
@@ -114,14 +115,18 @@ class TXFlowgraph(gr.top_block):
             self._throttle = None
 
         # ---------- Modulation chain ----------
+        validate_runtime_modulation(mod.type)
+
         self._chip_src = FrameChipSource(self._chip_queue)
+        self._mod_type = mod.type
+
         self._bit_to_float = blocks.char_to_float(1, 1.0)
         self._scale = blocks.multiply_const_ff(-2.0)
         self._offset_add = blocks.add_const_ff(1.0)
         self._float_to_complex = blocks.float_to_complex()
         self._null_src = blocks.null_source(gr.sizeof_float)
 
-        # RRC pulse shaping filter
+        # RRC pulse shaping filter at chip_rate for the current BPSK chip stream.
         sps = rf.sample_rate / mod.chip_rate_sps
         ps = mod.pulse_shaping
         n_taps = ps.span_symbols * int(sps) + 1

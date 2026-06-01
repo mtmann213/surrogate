@@ -64,6 +64,8 @@ class LinkStats:
 
     # Link health
     packet_loss_pct: float = 0.0   # (tx-rx)/tx * 100, only meaningful in loopback
+    detection_rate: float = 0.0    # rx_frames / tx_frames * 100 (detected vs transmitted)
+    fec_ok_rate: float = 0.0       # rx_fec_ok / max(rx_frames,1) * 100 (success among detected)
     running: bool = False
 
     # Recent event log strings (newest last)
@@ -181,6 +183,7 @@ class FlowgraphManager:
         log.info("Restarting flowgraphs")
         with self._lock:
             self._stop_flowgraphs()
+            self._stats = LinkStats()
             self._build_core_objects(self._cm.config)
             self._build_flowgraphs()
 
@@ -196,6 +199,9 @@ class FlowgraphManager:
         s.current_hop_freq = self._hop_scheduler.frequency_at(s.hop_index)
         if s.tx_frames > 0:
             s.packet_loss_pct = max(0.0, (s.tx_frames - s.rx_fec_ok) / s.tx_frames * 100)
+            s.detection_rate = s.rx_frames / s.tx_frames * 100
+        if s.rx_frames > 0:
+            s.fec_ok_rate = s.rx_fec_ok / s.rx_frames * 100
         s.recent_events = list(self._events)
         s.running = self._running
         return s
@@ -257,6 +263,13 @@ class FlowgraphManager:
         from radio.rx_flowgraph import RXFlowgraph
 
         cfg = self._cm.config
+
+        # Rebuild hop sequence from current config before constructing
+        # flowgraphs.  This ensures the BasebandHopper sees the correct
+        # frequency set when the user toggles hopping on/off or changes
+        # frequencies via the GUI.
+        self._hop_scheduler.rebuild()
+
         burst_s = cfg.timing.burst_duration_ms / 1000.0
         guard_s = cfg.timing.transition_time_ms / 1000.0
 
@@ -268,19 +281,15 @@ class FlowgraphManager:
         self._hop_timing = None  # legacy RF-hopping controller (unused in baseband path)
 
         if cfg.hopping.enabled:
-            # Pass UHD handles so hoppers can use time-anchored indexing
-            # for TX/RX synchronization.
             hopper_tx = BasebandHopper(
                 self._hop_scheduler, cfg.rf.sample_rate,
                 burst_s, guard_s, cfg.rf.center_frequency,
                 mode="tx",
-                uhd_handle=None,  # set after flowgraph build (needs sink)
             )
             hopper_rx = BasebandHopper(
                 self._hop_scheduler, cfg.rf.sample_rate,
                 burst_s, guard_s, cfg.rf.center_frequency,
                 mode="rx",
-                uhd_handle=None,  # set after flowgraph build (needs source)
             )
         else:
             hopper_tx = None
@@ -299,14 +308,9 @@ class FlowgraphManager:
             baseband_hopper=hopper_rx,
         )
 
-        # Start RX first so its UHD source is up and tuned to hop[0] before
-        # the TX UHD sink emits its first burst.
+        # Start RX first so its UHD source is tuned before TX transmits.
         self._rx_fg.start()
         self._tx_fg.start()
-
-        if cfg.hopping.enabled:
-            hopper_tx.set_start_time()
-            hopper_rx.set_start_time()
 
         log.info("Flowgraphs started")
 

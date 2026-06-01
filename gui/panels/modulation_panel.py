@@ -25,13 +25,9 @@ class ModulationPanel(QWidget):
         mod_form = QFormLayout(mod_grp)
 
         self.mod_type = QComboBox()
-        self.mod_type.addItems(["bpsk", "qpsk", "oqpsk", "msk", "gmsk"])
+        self.mod_type.addItems(["bpsk"])
         self.mod_type.setToolTip(
-            "BPSK:  Binary Phase Shift Keying. One bit per symbol. Most robust.\n"
-            "QPSK:  Quadrature PSK. Two bits per symbol. 2× throughput.\n"
-            "OQPSK: Offset QPSK. 1/2 chip offset to reduce amplitude fluctuations.\n"
-            "MSK:   Minimum Shift Keying. Continuous-phase (approximation).\n"
-            "GMSK:  Gaussian MSK. Gaussian-filtered MSK (BT=0.35).\n\n"
+            "BPSK: Binary Phase Shift Keying. 1 bit/symbol. Current hardware runtime mode.\n\n"
             "DSSS Theory: Bits are XORed with the spreading sequence.\n"
             "Bit '0' = Chips transmitted as-is.\n"
             "Bit '1' = Chips are inverted (180° phase flip)."
@@ -225,9 +221,9 @@ class ModulationPanel(QWidget):
                 f"Frame period:      {s['period_ms']:.3f} ms  "
                 f"(burst + {cfg.timing.transition_time_ms} ms guard)\n"
                 f"RF bandwidth:      {s['bandwidth_hz']/1e6:.3f} MHz  "
-                f"(chip_rate × (1+α))\n"
-                f"Samples/chip (sps):{s['sps']:.0f}  "
-                f"(sample_rate / chip_rate — must be integer)\n"
+                f"(symbol_rate × (1+α))\n"
+                f"Samples/symbol:{s['sps']:.0f}  "
+                f"(sample_rate / symbol_rate — must be integer)\n"
                 f"Processing gain:   {s['proc_gain_db']:.1f} dB  "
                 f"(10·log10({cfg.modulation.spreading.code_length}))\n"
                 f"Payload throughput:{s['throughput_bps']:.0f} bps"

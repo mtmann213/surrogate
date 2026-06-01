@@ -151,6 +151,24 @@ class StatusPanel(QWidget):
         pdr_row.addStretch()
         form.addRow("Delivery:", pdr_row)
 
+        # Detection rate (% of TX frames detected by RX)
+        detect_row = QHBoxLayout()
+        self._detect_label = ValueLabel("—")
+        self._detect_bar = MiniBar(0, 100)
+        detect_row.addWidget(self._detect_label)
+        detect_row.addWidget(self._detect_bar)
+        detect_row.addStretch()
+        form.addRow("Detect:", detect_row)
+
+        # Decode rate (% of detected frames with FEC OK)
+        decode_row = QHBoxLayout()
+        self._decode_label = ValueLabel("—")
+        self._decode_bar = MiniBar(0, 100)
+        decode_row.addWidget(self._decode_label)
+        decode_row.addWidget(self._decode_bar)
+        decode_row.addStretch()
+        form.addRow("Decode:", decode_row)
+
         # FEC
         fec_row = QHBoxLayout()
         self._fec_ok_label = QLabel("0 OK")
@@ -241,7 +259,7 @@ class StatusPanel(QWidget):
         self._rx_rate.setText(f"{s.rx_rate:.1f} pkt/s")
 
         pdr = max(0.0, 100.0 - s.packet_loss_pct)
-        self._pdr_label.setText(f"{pdr:.1f}%")
+        self._pdr_label.set_value(f"{pdr:.1f}%")
         self._pdr_bar.setValue(int(pdr))
         if pdr >= 95:
             self._pdr_label.set_value(f"{pdr:.1f}%", "#00c000")
@@ -249,6 +267,20 @@ class StatusPanel(QWidget):
             self._pdr_label.set_value(f"{pdr:.1f}%", "#c0c000")
         else:
             self._pdr_label.set_value(f"{pdr:.1f}%", "#c00000")
+
+        # Detection rate (% of TX frames detected by RX)
+        det = min(100.0, s.detection_rate) if s.tx_frames > 0 else 0.0
+        self._detect_label.set_value(f"{det:.1f}%")
+        self._detect_bar.setValue(int(det))
+        det_color = "#00c000" if det >= 90 else "#c0c000" if det >= 50 else "#c00000"
+        self._detect_label.set_value(f"{det:.1f}%", det_color)
+
+        # Decode rate (% of detected frames with FEC OK)
+        dec = min(100.0, s.fec_ok_rate) if s.rx_frames > 0 else 0.0
+        self._decode_label.set_value(f"{dec:.1f}%")
+        self._decode_bar.setValue(int(dec))
+        dec_color = "#00c000" if dec >= 90 else "#c0c000" if dec >= 50 else "#c00000"
+        self._decode_label.set_value(f"{dec:.1f}%", dec_color)
 
         self._fec_ok_label.setText(f"{s.rx_fec_ok:,} OK")
         errs = s.rx_fec_err

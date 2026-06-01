@@ -291,3 +291,62 @@ Recommendation:
 
 Review and stabilize the dirty GUI/runtime RF edits, starting with
 `radio/blocks/frame_sink.py` and the TX/RX 8PSK flowgraph wiring.
+
+## 2026-06-01 - BPSK Runtime Hardware Checkpoint
+
+### Goal
+
+Prepare a conservative, honest live-radio checkpoint for the first cabled B210
+loopback test.
+
+### Hardware Setup
+
+- B210 serial: `34D6458`
+- TX path: RF0 `TX/RX`
+- RX path: RF1 `RX2`
+- Inline attenuation: 60 dB
+- Initial gains: TX 35 dB, RX 35 dB
+- Center frequency: 915 MHz
+- Sample rate: 1 MS/s
+- Modulation: BPSK
+- Hopping: disabled for the first run
+
+### Changes
+
+- Updated `config/default_config.yaml` for the current B210 serial, 1 MS/s
+  sample rate, 1 MHz RF bandwidth, and conservative 35/35 dB gains.
+- Limited live GNU Radio runtime modulation to BPSK and added a guard so QPSK,
+  8PSK, and DPSK fail loudly instead of silently using the wrong path.
+- Kept the pure modulation/demodulation helpers for future modem work.
+- Changed `FrameSink` to accept complex chips and estimate per-frame phase from
+  the preamble correlation peak before despreading.
+- Reset link stats on restart and exposed detection/decode rates in the status
+  panel.
+- Rebuilt the hop sequence when constructing flowgraphs and kept baseband
+  hopping on the GNU Radio sample counter path.
+
+### Important Runtime Decision
+
+The attempted 8PSK flowgraph wiring was not committed as a live runtime mode.
+It packed the entire chip stream into 3-bit symbols, which conflicts with the
+current chip-oriented preamble and frame sink assumptions unless frame lengths
+and preamble alignment are designed around symbol packing. QPSK also did not
+have a real runtime path. The runtime is therefore intentionally BPSK-only for
+this hardware checkpoint.
+
+### Verification
+
+```bash
+python3 -m unittest discover -v
+python3 -m compileall -q core radio gui logging_module main.py diagnose_link.py test_rx_power.py tests tools
+```
+
+Passed.
+
+Manual GNU Radio construction check:
+
+```bash
+python3 -c "... construct TXFlowgraph/RXFlowgraph in simulation mode ..."
+```
+
+Passed for BPSK at 1 MS/s and 250 kchip/s.

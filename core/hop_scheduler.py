@@ -83,6 +83,15 @@ class HopScheduler:
         with self._lock:
             return self._sequence.tolist()
 
+    def rebuild(self) -> None:
+        """Rebuild the hop sequence from current config settings.
+        Called during flowgraph restart after config changes."""
+        with self._lock:
+            self._build_sequence()
+            self._index = 0
+        log.info("Hop sequence rebuilt (enabled=%s, type=%s, n_freqs=%d)",
+                 self._cfg.enabled, self._cfg.hop_type, len(self._sequence))
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------

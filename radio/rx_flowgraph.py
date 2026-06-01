@@ -3,7 +3,7 @@ RX Flowgraph.
 
 Signal chain:
   UHD Source -> DC Blocker -> AGC -> RRC Matched Filter
-  -> Timing Recovery (M&M) -> Costas Loop -> complex_to_real -> FrameSink
+  -> Timing Recovery (M&M) -> Costas Loop -> FrameSink
 
 FrameSink handles the complete frame pipeline internally:
   preamble detection -> chip collection -> despreading -> callback
@@ -26,6 +26,7 @@ from core.spreading_codes import get_code
 from radio.blocks.frame_sink import FrameSink
 from radio.blocks.hop_controller import HopController
 from radio.blocks.baseband_hopper import BasebandHopper
+from radio.runtime_modulation import validate_runtime_modulation
 
 log = logging.getLogger(__name__)
 
@@ -50,10 +51,13 @@ class RXFlowgraph(gr.top_block):
         timing  = cfg.timing
         frame   = cfg.frame
 
+        validate_runtime_modulation(mod.type)
+
         sample_rate = rf.sample_rate
         chip_rate   = mod.chip_rate_sps
         sps         = sample_rate / chip_rate
         self._sps   = sps
+        self._mod_type = mod.type
         burst_s     = timing.burst_duration_ms / 1000.0
         guard_s     = timing.transition_time_ms / 1000.0
 
@@ -111,17 +115,9 @@ class RXFlowgraph(gr.top_block):
         )
 
         # ---- Costas Loop (BPSK carrier phase recovery) ----
-        # Provides coarse phase alignment so the signal lands on the I axis.
-        # FrameSink does per-burst phase estimation for fine alignment and
-        # 180 deg ambiguity resolution (handles hop phase jumps).
-        # Costas loop bandwidth: narrow for static BPSK.
-        # BW = 2*pi/500 rad/sample = 0.0126 rad/sample at 250 kchip/s = ~500 Hz loop BW.
         self._costas = digital.costas_loop_cc(2 * np.pi / 500.0, 2)
 
-       # ---- complex_to_real -> float32 FrameSink ----
-        self._complex_to_real = blocks.complex_to_real()
-
-        # ---- Frame Sink (preamble detect + despread + callback, float32 input) ----
+        # ---- Frame Sink (complex64 input, preamble detect + despread + callback) ----
         preamble_bits = frame_gen.preamble_bits
         self._frame_sink = FrameSink(
             preamble_bits   = preamble_bits,
@@ -161,15 +157,11 @@ class RXFlowgraph(gr.top_block):
             self.connect(last, self._hop_ctrl)
             last = self._hop_ctrl
 
-      # BPSK / QPSK: RRC -> M&M -> Costas -> complex_to_real -> FrameSink (float32)
-        # Costas loop bandwidth increased for hopping: wider bandwidth allows
-        # the loop to track hop frequency offsets (up to ~50 kHz at this setting).
-        # FrameSink does despreading with polarity tracking.
+        # RRC -> M&M -> Costas -> FrameSink
         self.connect(last, self._rrc_mf)
         self.connect(self._rrc_mf, self._timing_recovery)
         self.connect(self._timing_recovery, self._costas)
-        self.connect(self._costas, self._complex_to_real)
-        self.connect(self._complex_to_real, self._frame_sink)
+        self.connect(self._costas, self._frame_sink)
 
     def _on_frame_received(self, coded_bits: np.ndarray,
                            timestamp: float, snr: float) -> None:
